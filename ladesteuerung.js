@@ -10,13 +10,13 @@
 
 var DRY_RUN         = true;    // true = Testmodus, kein Schreiben ins Register
 
-var ZIEL_UHRZEIT    = 15;      // Uhr – Batterie soll bis dahin voll sein
+var ZIEL_UHRZEIT    = 16;      // Uhr – Batterie soll bis dahin voll sein
 var ZIEL_SOC        = 100;     // % – Ziel-Ladestand
 var BATTERIE_KWH    = 9.6;     // kWh – nutzbare Kapazität SBR096
 var MAX_LEISTUNG    = 6000;    // W – maximale Ladeleistung, wr kann bis 10,6kWh
 var MIN_LEISTUNG    = 500;     // W – Minimum (verhindert Abbruch des Ladevorgangs)
-var START_STUNDE    = 9;       // Uhr – Steuerung aktiv ab
-var END_STUNDE      = 17;      // Uhr – Steuerung aktiv bis
+var START_STUNDE    = 8;       // Uhr – Steuerung aktiv ab (erste Stunde dient als Referenz für SOC-Rückstand)
+var END_STUNDE      = 17;      // Uhr – Steuerung aktiv bis (letzte adaptive Entscheidung um END_STUNDE-1 Uhr)
 
 // PV-Prognose Schwellwert: ab dieser Tagesmenge "entspannt" laden
 var PV_PROGNOSE_HOCH = 50000; // Wh – sonniger Tag → sanft mit 1500W starten
