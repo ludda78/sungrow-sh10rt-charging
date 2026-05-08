@@ -97,7 +97,7 @@ function berechneBasisleistung(soc, restStunden) {
 // HAUPTLOGIK – läuft stündlich
 // ============================================================
 
-schedule('0 * * * *', function() {
+schedule('0 8-17 * * *', function() {
 
     var jetzt       = new Date();
     var stunde      = jetzt.getHours();
