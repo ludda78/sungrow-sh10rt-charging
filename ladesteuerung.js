@@ -1,7 +1,18 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.0.0
+// Version: 1.0.1
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
+// ============================================================
+//
+// CHANGELOG
+// ---------
+// v1.0.1 – 2026-05-09
+//   - PV-Verhältnis Log: irreführende Meldung "Tagesprognose noch nicht
+//     gesetzt" ersetzt durch echten Grund inkl. pvNow-Wert in kWh
+//
+// v1.0.0 – 2026-05-06
+//   - Erstveröffentlichung: adaptive Ladesteuerung für Sungrow SH10RT
+//   - START_STUNDE=8, Zeitfenster 8–17 Uhr, DRY_RUN=true
 // ============================================================
 
 // ============================================================
@@ -154,7 +165,7 @@ schedule('0 8-17 * * *', function() {
     // ENTSCHEIDUNG 1: PV-Verhältnis prüfen
     // -------------------------------------------------------
     var pvVerhaeltnis   = null;
-    var pvVerhaeltnisText = 'unbekannt (Tagesprognose noch nicht gesetzt)';
+    var pvVerhaeltnisText = 'unbekannt (pvNow zu gering: ' + (pvNowWh / 1000).toFixed(2) + ' kWh < 0.5 kWh Schwelle)';
 
     if (pvNowWh > 500) {
         // Erst ab 500Wh Prognose sinnvoll vergleichen
