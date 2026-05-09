@@ -1,6 +1,6 @@
 # Sungrow SH10RT – Adaptive Ladesteuerung
 
-**Version:** 1.0.0  
+**Version:** 1.0.4  
 **Plattform:** ioBroker JavaScript Adapter  
 **Wechselrichter:** Sungrow SH10RT-20  
 **Batterie:** Sungrow SBR096 (9,6 kWh)
@@ -9,21 +9,21 @@
 
 ## Ziel
 
-Die Batterie soll an sonnigen Tagen möglichst schonend und gleichmäßig über den Tag verteilt geladen werden – mit dem obersten Ziel, bis **15:00 Uhr auf 100% SOC** zu kommen. Bei schlechter PV-Ausbeute oder Rückstand wird die Ladeleistung automatisch erhöht.
+Die Batterie soll an sonnigen Tagen möglichst schonend und gleichmäßig über den Tag verteilt geladen werden – mit dem obersten Ziel, bis **16:00 Uhr auf 100% SOC** zu kommen. Bei schlechter PV-Ausbeute oder Rückstand wird die Ladeleistung automatisch erhöht.
 
 ---
 
 ## Funktionsweise
 
-Das Skript läuft **einmal pro Stunde** (zur vollen Stunde) und entscheidet anhand von drei Steuerungsgrößen, welche maximale Ladeleistung ins Modbus Holding Register geschrieben wird.
+Das Skript läuft **einmal pro Stunde um :02** (pvforecast-Adapter aktualisiert bei :00:30, Lesen bei :02 stellt frische Daten sicher) und entscheidet anhand von drei Steuerungsgrößen, welche maximale Ladeleistung ins Modbus Holding Register geschrieben wird.
 
 ### Zeitfenster
 
 | Zeitraum | Verhalten |
 |----------|-----------|
-| Vor 09:00 Uhr | 6000W freigegeben (WR und Batterie regeln selbst) |
-| 09:00–17:00 Uhr | Adaptive Steuerung aktiv |
-| Nach 17:00 Uhr | 6000W freigegeben |
+| Vor 08:00 Uhr | MAX_LEISTUNG freigegeben (WR und Batterie regeln selbst) |
+| 08:00–17:00 Uhr | Adaptive Steuerung aktiv |
+| Nach 17:00 Uhr | MAX_LEISTUNG freigegeben |
 
 ### Steuerungsgrößen
 
@@ -32,18 +32,18 @@ Das Skript läuft **einmal pro Stunde** (zur vollen Stunde) und entscheidet anha
 Die Mindestleistung die rechnerisch nötig ist, um das Ziel pünktlich zu erreichen:
 
 ```
-Basisleistung = (fehlende kWh bis 100%) / (Stunden bis 15:00) × 1000
+Basisleistung = (fehlende kWh bis 100%) / (Stunden bis 16:00) × 1000
 ```
 
 **Beispiele:**
 
 | Uhrzeit | SOC | Fehlende kWh | Reststunden | Basisleistung |
 |---------|-----|-------------|-------------|---------------|
-| 09:00 | 20% | 7,68 kWh | 6,0 h | 1280 W |
-| 11:00 | 40% | 5,76 kWh | 4,0 h | 1440 W |
-| 13:00 | 55% | 4,32 kWh | 2,0 h | 2160 W |
-| 14:00 | 60% | 3,84 kWh | 1,0 h | 3840 W |
-| 14:00 | 30% | 6,72 kWh | 1,0 h | 6000 W (Notfall) |
+| 08:00 | 5% | 9,12 kWh | 8,0 h | 1140 W |
+| 10:00 | 25% | 7,20 kWh | 6,0 h | 1200 W |
+| 12:00 | 50% | 4,80 kWh | 4,0 h | 1200 W |
+| 14:00 | 60% | 3,84 kWh | 2,0 h | 1920 W |
+| 15:00 | 30% | 6,72 kWh | 1,0 h | 6570 W (MAX) |
 
 #### 2. PV-Verhältnis
 
@@ -53,47 +53,51 @@ Stündlicher Vergleich: tatsächliche Erzeugung vs. was laut Prognose bis jetzt 
 PV-Verhältnis = pv_energy_today (Wh) / pvforecast.energy.now (Wh)
 ```
 
+Der Vergleich ist erst ab 500 Wh Prognosewert sinnvoll (früh morgens zu wenig Datenbasis). Darunter wird das Verhältnis als unbekannt geloggt.
+
 | Verhältnis | Bedeutung | Reaktion |
 |------------|-----------|----------|
 | > 90% | Prognose stimmt | Plan beibehalten |
 | 70–90% | Etwas schwächer | Basisleistung verwenden |
-| < 70% | Deutlich schlechter | Sofort 6000W |
+| < 70% | Deutlich schlechter | Sofort MAX_LEISTUNG |
 
 #### 3. SOC-Rückstand (kumuliert)
 
-Jede Stunde wird verglichen wie viel der SOC gestiegen ist vs. was bei der eingestellten Ladeleistung zu erwarten gewesen wäre. Die Abweichungen werden über den Tag aufsummiert.
+Jede Stunde wird verglichen wie viel der SOC gestiegen ist vs. was bei der **Basisleistung der Vorperiode** zu erwarten gewesen wäre. Die Abweichungen werden über den Tag aufsummiert.
 
 ```
-Erwarteter SOC-Anstieg = Ladeleistung (kW) / 9,6 kWh × 100
+Erwarteter SOC-Anstieg = basisLeistungVorigeStunde (kW) / 9,6 kWh × 100
 Rückstand = max(0, erwartet - tatsächlich)
 Kumulierter Rückstand += Rückstand dieser Stunde
 ```
 
+Wichtig: Als Referenz dient die **Basisleistung** (Mindestleistung zum Erreichen des Ziels), nicht die tatsächlich ins Register geschriebene Leistung. Das Register ist ein Ceiling – wieviel wirklich fließt hängt vom PV-Überschuss ab.
+
 **Beispiel:**
 
-| Stunde | Leistung | Erw. SOC+ | Ist SOC+ | Rückstand | Kumuliert |
-|--------|----------|-----------|----------|-----------|-----------|
-| 10:00 | 1500 W | 15,6% | 14,0% | 1,6% | 1,6% |
-| 11:00 | 1500 W | 15,6% | 8,0% | 7,6% | 9,2% |
-| 12:00 | – | – | – | – | → **KRITISCH** |
+| Stunde | Basisl. Vorh. | Erw. SOC+ | Ist SOC+ | Rückstand | Kumuliert |
+|--------|---------------|-----------|----------|-----------|-----------|
+| 09:00 | 1140 W | 11,9% | 10,0% | 1,9% | 1,9% |
+| 10:00 | 1200 W | 12,5% | 5,0% | 7,5% | 9,4% |
+| 11:00 | – | – | – | – | → **KRITISCH** |
 
 | Kumulierter Rückstand | Reaktion |
 |----------------------|----------|
 | < 5% | Nichts tun |
 | 5–10% | Basisleistung × 1,5 |
-| > 10% | Sofort 6000W |
+| > 10% | Sofort MAX_LEISTUNG |
 
 ### Entscheidungsreihenfolge
 
 Die Priorität ist von oben nach unten:
 
 1. **SOC bereits 100%** → MAX freigeben, WR regelt selbst
-2. **Zeit überschritten (nach 15:00)** → MAX freigeben
-3. **Kumulierter Rückstand > 10%** → sofort 6000W
-4. **PV-Verhältnis < 70%** → sofort 6000W
+2. **Zeit überschritten (nach 16:00)** → MAX freigeben
+3. **Kumulierter Rückstand > 10%** → sofort MAX_LEISTUNG
+4. **PV-Verhältnis < 70%** → sofort MAX_LEISTUNG
 5. **Kumulierter Rückstand 5–10%** → Basisleistung × 1,5
 6. **PV-Verhältnis 70–90%** → Basisleistung
-7. **Viel PV (Tagesprognose > 50 kWh) + alles im Plan** → max(Basisleistung, 1500W)
+7. **Viel PV (Tagesprognose > 40 kWh) + alles im Plan** → max(Basisleistung, 1500W)
 8. **Normalbetrieb** → Basisleistung
 
 ### Schreibschutz
@@ -118,22 +122,22 @@ Das Register wird nur beschrieben wenn sich der Wert um mehr als 100W geändert 
 
 Alle Parameter stehen am Anfang des Skripts im Abschnitt `KONFIGURATION`:
 
-| Parameter | Standard | Beschreibung |
+| Parameter | Aktuell | Beschreibung |
 |-----------|---------|--------------|
 | `DRY_RUN` | `true` | Testmodus – kein Schreiben ins Register |
-| `ZIEL_UHRZEIT` | `15` | Zielzeit für vollen Akku |
+| `ZIEL_UHRZEIT` | `16` | Zielzeit für vollen Akku |
 | `ZIEL_SOC` | `100` | Ziel-Ladestand in % |
 | `BATTERIE_KWH` | `9.6` | Nutzbare Kapazität in kWh |
-| `MAX_LEISTUNG` | `6000` | Maximale Ladeleistung in W |
+| `MAX_LEISTUNG` | `6570` | Maximale Ladeleistung in W |
 | `MIN_LEISTUNG` | `500` | Minimale Ladeleistung in W |
-| `START_STUNDE` | `9` | Steuerung aktiv ab (Uhr) |
+| `START_STUNDE` | `8` | Steuerung aktiv ab (Uhr) |
 | `END_STUNDE` | `17` | Steuerung aktiv bis (Uhr) |
-| `PV_PROGNOSE_HOCH` | `50000` | Schwellwert "viel PV" in Wh |
+| `PV_PROGNOSE_HOCH` | `40000` | Schwellwert "viel PV" in Wh. Anlage max ~60 kWh; empirisch (09.05.2026): 30 kWh Produktion reichte für volle Batterie + Einspeisung |
 | `LEISTUNG_SANFT` | `1500` | Leistung bei viel Sonne und Plan OK |
 | `RUECKSTAND_MODERAT` | `5` | SOC-Rückstand % → Leistung × 1,5 |
-| `RUECKSTAND_KRITISCH` | `10` | SOC-Rückstand % → sofort 6000W |
+| `RUECKSTAND_KRITISCH` | `10` | SOC-Rückstand % → sofort MAX_LEISTUNG |
 | `PV_VERH_GUT` | `0.9` | PV-Verhältnis ab dem Plan als "gut" gilt |
-| `PV_VERH_MODERAT` | `0.7` | PV-Verhältnis ab dem sofort 6000W |
+| `PV_VERH_MODERAT` | `0.7` | PV-Verhältnis ab dem sofort MAX_LEISTUNG |
 
 ---
 
@@ -164,10 +168,11 @@ Skript neu starten. Ab jetzt wird das Register beschrieben.
 
 ### Schritt 4: Feintuning
 
-Nach einigen Tagen die Schwellwerte anhand der Grafana-Daten anpassen:
-- `PV_PROGNOSE_HOCH` – abhängig von tatsächlich guten Tagen
-- `LEISTUNG_SANFT` – je nach gewünschter Batterischonung
+Nach einigen Wochen die Schwellwerte anhand der InfluxDB-Daten anpassen:
+- `PV_PROGNOSE_HOCH` – anhand realer Produktionsdaten kalibrieren (Forecast vs. Ist)
+- `LEISTUNG_SANFT` – je nach gewünschter Batterieschonung
 - `RUECKSTAND_KRITISCH` – je nach Toleranz für Abweichungen
+- `PV_VERH_MODERAT` – falls Forecast systematisch zu optimistisch ist, erhöhen
 
 ---
 
@@ -183,21 +188,22 @@ Alle Ausgaben haben das Präfix `[Ladesteuerung]` und erscheinen im ioBroker Pro
 
 **Beispiel-Log eines normalen Stundendurchlaufs:**
 ```
-[Ladesteuerung] === Stündliche Prüfung | 11:00:00 ===
-[Ladesteuerung] SOC: 42% | PV heute: 3.2 kWh | PV Prognose noch: 28.4 kWh | Reststunden bis 15 Uhr: 4.0h | Basisleistung: 1392W
+[Ladesteuerung] === Stündliche Prüfung | 11:02:00 ===
+[Ladesteuerung] SOC: 42% | PV heute: 3.2 kWh | PV Prognose noch: 28.4 kWh | Reststunden bis 16 Uhr: 5.0h | Basisleistung: 1044W
 [Ladesteuerung] PV-Verhältnis: 88% (real 3.2 kWh / erwartet 3.6 kWh)
-[Ladesteuerung] SOC-Anstieg: erwartet 16% / tatsächlich 14% | Rückstand diese Stunde: 2% | Kumulierter Rückstand: 2.0%
-[Ladesteuerung] PV moderat unter Prognose (88%) → Basisleistung 1392W
-[Ladesteuerung] Geschrieben: 1400W (vorher: 1500W) | PV moderat unter Prognose...
+[Ladesteuerung] SOC-Anstieg: erwartet 11% / tatsächlich 9.5% | Rückstand diese Stunde: 1.5% | Kumulierter Rückstand: 1.5%
+[Ladesteuerung] PV moderat unter Prognose (88%) → Basisleistung 1044W
+[Ladesteuerung] Geschrieben: 1000W (vorher: 1100W) | PV moderat unter Prognose...
 ```
 
 ---
 
 ## Bekannte Einschränkungen
 
-- Der **kumulierte Rückstand** wird bei Skript-Neustart zurückgesetzt
-- Der **Tagesprognose-Gesamtwert** wird nur einmal um 09:00 Uhr gesetzt – ein Neustart danach setzt `tagesPrognose = null` bis zum nächsten Tag
-- Das Skript reagiert nur **stündlich** – schnelle Wetteränderungen werden erst zur nächsten vollen Stunde berücksichtigt
+- Der **kumulierte Rückstand** und `basisLeistungVorigeStunde` werden bei Skript-Neustart zurückgesetzt
+- Der **Tagesprognose-Gesamtwert** wird nur einmal um START_STUNDE gesetzt – ein Neustart danach setzt `tagesPrognose = null` bis zum nächsten Tag
+- Das Skript reagiert nur **stündlich** – schnelle Wetteränderungen werden erst zur nächsten Stunde berücksichtigt
+- Das PV-Verhältnis ist erst ab 500 Wh pvNow aussagekräftig (in den ersten Morgenstunden unbekannt)
 
 ---
 
