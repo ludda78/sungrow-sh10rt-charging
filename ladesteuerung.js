@@ -1,11 +1,15 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.0.1
+// Version: 1.0.2
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.0.2 – 2026-05-09
+//   - Schedule auf Minute :02 verschoben (pvforecast aktualisiert bei :00:30)
+//   - restStunden-Berechnung auf volle Stunden vereinfacht (Minuten ignoriert)
+//
 // v1.0.1 – 2026-05-09
 //   - PV-Verhältnis Log: irreführende Meldung "Tagesprognose noch nicht
 //     gesetzt" ersetzt durch echten Grund inkl. pvNow-Wert in kWh
@@ -108,11 +112,10 @@ function berechneBasisleistung(soc, restStunden) {
 // HAUPTLOGIK – läuft stündlich
 // ============================================================
 
-schedule('0 8-17 * * *', function() {
+schedule('2 8-17 * * *', function() {
 
     var jetzt       = new Date();
     var stunde      = jetzt.getHours();
-    var zeitAlsZahl = stunde + jetzt.getMinutes() / 60;
 
     log_info('=== Stündliche Prüfung | ' + jetzt.toLocaleTimeString('de-DE') + ' ===');
 
@@ -137,7 +140,7 @@ schedule('0 8-17 * * *', function() {
     var pvHeuteWh   = pvHeuteKwh * 1000;                           // in Wh umrechnen
     var pvNowWh     = getState(DP_PV_NOW).val;                     // Wh – Prognose für bereits vergangene Zeit
     var pvNochWh    = getState(DP_PV_PROGNOSE).val;                // Wh – noch zu erwarten heute
-    var restStunden = Math.max(0, ZIEL_UHRZEIT - zeitAlsZahl);
+    var restStunden = Math.max(0, ZIEL_UHRZEIT - stunde);
     var basisLeistung = berechneBasisleistung(soc, restStunden);
 
     log_info('SOC: ' + soc + '% | PV heute: ' + pvHeuteKwh.toFixed(1) + ' kWh | ' +
