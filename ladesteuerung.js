@@ -1,11 +1,22 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.0.2
+// Version: 1.0.4
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.0.4 – 2026-05-09
+//   - PV_PROGNOSE_HOCH von 50.000 auf 40.000 Wh gesenkt (Anlage max ~60 kWh,
+//     Tagesverbrauch ~13 kWh; empirisch bestätigt dass 30 kWh Produktion
+//     bereits für volle Batterie + Einspeisung reicht)
+//
+// v1.0.3 – 2026-05-09
+//   - Logikfehler: SOC-Rückstand basierte auf letzterWert (Ceiling), nicht
+//     auf basisLeistung (Minimum zum Erreichen des Ziels). Neu: speichert
+//     basisLeistungVorigeStunde als Referenz für den erwarteten SOC-Anstieg
+//   - Floating Point Fix: Rückstand wird auf 1 Dezimalstelle gerundet
+//
 // v1.0.2 – 2026-05-09
 //   - Schedule auf Minute :02 verschoben (pvforecast aktualisiert bei :00:30)
 //   - restStunden-Berechnung auf volle Stunden vereinfacht (Minuten ignoriert)
@@ -28,13 +39,13 @@ var DRY_RUN         = true;    // true = Testmodus, kein Schreiben ins Register
 var ZIEL_UHRZEIT    = 16;      // Uhr – Batterie soll bis dahin voll sein
 var ZIEL_SOC        = 100;     // % – Ziel-Ladestand
 var BATTERIE_KWH    = 9.6;     // kWh – nutzbare Kapazität SBR096
-var MAX_LEISTUNG    = 6000;    // W – maximale Ladeleistung, wr kann bis 10,6kWh
+var MAX_LEISTUNG    = 6570;    // W – maximale Ladeleistung, wr kann bis 10,6kWh
 var MIN_LEISTUNG    = 500;     // W – Minimum (verhindert Abbruch des Ladevorgangs)
 var START_STUNDE    = 8;       // Uhr – Steuerung aktiv ab (erste Stunde dient als Referenz für SOC-Rückstand)
 var END_STUNDE      = 17;      // Uhr – Steuerung aktiv bis (letzte adaptive Entscheidung um END_STUNDE-1 Uhr)
 
 // PV-Prognose Schwellwert: ab dieser Tagesmenge "entspannt" laden
-var PV_PROGNOSE_HOCH = 50000; // Wh – sonniger Tag → sanft mit 1500W starten
+var PV_PROGNOSE_HOCH = 40000; // Wh – sonniger Tag → sanft mit 1500W starten
 
 // Leistung bei viel Sonne (Grundlast)
 var LEISTUNG_SANFT  = 1500;   // W
@@ -62,10 +73,11 @@ var DP_HR_LADEN     = 'modbus.0.holdingRegisters.33046_Max_Charging_Power';  // 
 // ZUSTAND (wird zur Laufzeit gehalten)
 // ============================================================
 
-var letzterWert         = null;   // zuletzt geschriebene Ladeleistung (W)
-var socVorEinerStunde   = null;   // SOC-Wert der letzten Stunde
-var kumulierterRueckstand = 0;    // % – Summe der SOC-Rückstände über den Tag
-var tagesPrognose       = null;   // Wh – Prognose gesamt (wird um 9 Uhr gesetzt)
+var letzterWert              = null;   // zuletzt geschriebene Ladeleistung (W)
+var socVorEinerStunde        = null;   // SOC-Wert der letzten Stunde
+var basisLeistungVorigeStunde = null;  // Basisleistung der Vorperiode (Referenz für SOC-Anstieg)
+var kumulierterRueckstand    = 0;      // % – Summe der SOC-Rückstände über den Tag
+var tagesPrognose            = null;   // Wh – Prognose gesamt (wird um START_STUNDE gesetzt)
 
 // ============================================================
 // HILFSFUNKTIONEN
@@ -121,9 +133,10 @@ schedule('2 8-17 * * *', function() {
 
     // --- Tagesstart: Prognose merken ---
     if (stunde === START_STUNDE) {
-        tagesPrognose       = getState(DP_PV_PROGNOSE).val + getState(DP_PV_NOW).val;
-        kumulierterRueckstand = 0;
-        socVorEinerStunde   = null;
+        tagesPrognose              = getState(DP_PV_PROGNOSE).val + getState(DP_PV_NOW).val;
+        kumulierterRueckstand      = 0;
+        socVorEinerStunde          = null;
+        basisLeistungVorigeStunde  = null;
         log_info('Tagesstart – Tagesprognose gesamt: ' + (tagesPrognose / 1000).toFixed(1) + ' kWh');
     }
 
@@ -183,16 +196,14 @@ schedule('2 8-17 * * *', function() {
     // -------------------------------------------------------
     // ENTSCHEIDUNG 2: SOC-Rückstand prüfen
     // -------------------------------------------------------
-    if (socVorEinerStunde !== null) {
-        var socAnstiegIst      = soc - socVorEinerStunde;
-        var socAnstiegErwartet = letzterWert !== null
-            ? Math.round(letzterWert / 1000 / BATTERIE_KWH * 100)
-            : 0;
-        var rueckstandDieseStunde = Math.max(0, socAnstiegErwartet - socAnstiegIst);
+    if (socVorEinerStunde !== null && basisLeistungVorigeStunde !== null) {
+        var socAnstiegIst         = soc - socVorEinerStunde;
+        var socAnstiegErwartet    = Math.round(basisLeistungVorigeStunde / 1000 / BATTERIE_KWH * 100);
+        var rueckstandDieseStunde = Math.max(0, Math.round((socAnstiegErwartet - socAnstiegIst) * 10) / 10);
         kumulierterRueckstand    += rueckstandDieseStunde;
 
-        log_info('SOC-Anstieg: erwartet ' + socAnstiegErwartet + '% / tatsächlich ' + socAnstiegIst + '% | ' +
-                 'Rückstand diese Stunde: ' + rueckstandDieseStunde + '% | ' +
+        log_info('SOC-Anstieg: erwartet ' + socAnstiegErwartet + '% / tatsächlich ' + socAnstiegIst.toFixed(1) + '% | ' +
+                 'Rückstand diese Stunde: ' + rueckstandDieseStunde.toFixed(1) + '% | ' +
                  'Kumulierter Rückstand: ' + kumulierterRueckstand.toFixed(1) + '%');
     } else {
         log_info('SOC-Rückstand: noch kein Vorwert (erste Stunde)');
@@ -243,6 +254,7 @@ schedule('2 8-17 * * *', function() {
         log_info(grund);
     }
 
+    basisLeistungVorigeStunde = basisLeistung;
     schreibeLeistung(leistung, grund);
 });
 
