@@ -1,11 +1,16 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.0.4
+// Version: 1.0.5
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.0.5 – 2026-05-09
+//   - DRY_RUN deaktiviert → Livebetrieb
+//   - Neue Datenpunkte: javascript.0.ladesteuerung.schreibzyklen (täglich)
+//     und schreibzyklen_gesamt (kumulativ); Log zeigt Zählstand je Schreibvorgang
+//
 // v1.0.4 – 2026-05-09
 //   - PV_PROGNOSE_HOCH von 50.000 auf 40.000 Wh gesenkt (Anlage max ~60 kWh,
 //     Tagesverbrauch ~13 kWh; empirisch bestätigt dass 30 kWh Produktion
@@ -34,7 +39,7 @@
 // KONFIGURATION – hier anpassen
 // ============================================================
 
-var DRY_RUN         = true;    // true = Testmodus, kein Schreiben ins Register
+var DRY_RUN         = false;   // true = Testmodus, kein Schreiben ins Register
 
 var ZIEL_UHRZEIT    = 16;      // Uhr – Batterie soll bis dahin voll sein
 var ZIEL_SOC        = 100;     // % – Ziel-Ladestand
@@ -67,7 +72,9 @@ var DP_SOC          = 'modbus.0.inputRegisters.13022_Battery_level_';
 var DP_PV_HEUTE     = 'modbus.0.inputRegisters.13001_Daily_PV_Generation';   // kWh
 var DP_PV_PROGNOSE  = 'pvforecast.0.summary.energy.nowUntilEndOfDay';        // Wh – noch zu erwarten
 var DP_PV_NOW       = 'pvforecast.0.summary.energy.now';                     // Wh – heute laut Prognose bereits erzeugt
-var DP_HR_LADEN     = 'modbus.0.holdingRegisters.33046_Max_Charging_Power';  // W
+var DP_HR_LADEN          = 'modbus.0.holdingRegisters.33046_Max_Charging_Power';  // W
+var DP_SCHREIBZYKLEN     = 'javascript.0.ladesteuerung.schreibzyklen';            // Schreibvorgänge heute
+var DP_SCHREIBZYKLEN_GES = 'javascript.0.ladesteuerung.schreibzyklen_gesamt';     // Schreibvorgänge gesamt
 
 // ============================================================
 // ZUSTAND (wird zur Laufzeit gehalten)
@@ -107,7 +114,12 @@ function schreibeLeistung(leistung, grund) {
         log_info('[DRY RUN] Würde schreiben: ' + leistung + 'W (vorher: ' + letzterWert + 'W) | ' + grund);
     } else {
         setState(DP_HR_LADEN, leistung);
-        log_info('Geschrieben: ' + leistung + 'W (vorher: ' + letzterWert + 'W) | ' + grund);
+        var zyklenHeute   = (getState(DP_SCHREIBZYKLEN).val     || 0) + 1;
+        var zyklenGesamt  = (getState(DP_SCHREIBZYKLEN_GES).val || 0) + 1;
+        setState(DP_SCHREIBZYKLEN,     zyklenHeute);
+        setState(DP_SCHREIBZYKLEN_GES, zyklenGesamt);
+        log_info('Geschrieben: ' + leistung + 'W (vorher: ' + letzterWert + 'W) | ' + grund +
+                 ' | Schreibzyklus #' + zyklenHeute + ' heute / ' + zyklenGesamt + ' gesamt');
     }
 
     letzterWert = leistung;
@@ -137,6 +149,7 @@ schedule('2 8-17 * * *', function() {
         kumulierterRueckstand      = 0;
         socVorEinerStunde          = null;
         basisLeistungVorigeStunde  = null;
+        setState(DP_SCHREIBZYKLEN, 0);
         log_info('Tagesstart – Tagesprognose gesamt: ' + (tagesPrognose / 1000).toFixed(1) + ' kWh');
     }
 
@@ -257,5 +270,8 @@ schedule('2 8-17 * * *', function() {
     basisLeistungVorigeStunde = basisLeistung;
     schreibeLeistung(leistung, grund);
 });
+
+createState('ladesteuerung.schreibzyklen',     0, false, { name: 'Ladesteuerung – Schreibzyklen heute',  type: 'number', role: 'value', unit: '' });
+createState('ladesteuerung.schreibzyklen_gesamt', 0, false, { name: 'Ladesteuerung – Schreibzyklen gesamt', type: 'number', role: 'value', unit: '' });
 
 log_info('Skript gestartet | DRY_RUN=' + DRY_RUN + ' | Aktiv: ' + START_STUNDE + ':00–' + END_STUNDE + ':00 Uhr | Ziel: ' + ZIEL_SOC + '% bis ' + ZIEL_UHRZEIT + ':00 Uhr');
