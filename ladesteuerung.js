@@ -1,11 +1,16 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.0.5
+// Version: 1.0.6
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.0.6 – 2026-05-12
+//   - Dreistufige Forecast-Logik: neuer Parameter PV_PROGNOSE_NIEDRIG (35 kWh)
+//     Forecast < 35 kWh → sofort MAX_LEISTUNG (schlechter Tag, jede kWh zählt)
+//     Forecast 35–40 kWh → Basisleistung | Forecast > 40 kWh → sanft
+//
 // v1.0.5 – 2026-05-09
 //   - DRY_RUN deaktiviert → Livebetrieb
 //   - Neue Datenpunkte: javascript.0.ladesteuerung.schreibzyklen (täglich)
@@ -49,8 +54,10 @@ var MIN_LEISTUNG    = 500;     // W – Minimum (verhindert Abbruch des Ladevorg
 var START_STUNDE    = 8;       // Uhr – Steuerung aktiv ab (erste Stunde dient als Referenz für SOC-Rückstand)
 var END_STUNDE      = 17;      // Uhr – Steuerung aktiv bis (letzte adaptive Entscheidung um END_STUNDE-1 Uhr)
 
-// PV-Prognose Schwellwert: ab dieser Tagesmenge "entspannt" laden
-var PV_PROGNOSE_HOCH = 40000; // Wh – sonniger Tag → sanft mit 1500W starten
+// PV-Prognose Schwellwerte (Dreistufig)
+var PV_PROGNOSE_NIEDRIG = 35000; // Wh – schlechter Tag → sofort MAX_LEISTUNG
+var PV_PROGNOSE_HOCH    = 40000; // Wh – guter Tag → sanft mit LEISTUNG_SANFT
+                                  //   < 35 kWh → MAX | 35–40 kWh → Basis | > 40 kWh → sanft
 
 // Leistung bei viel Sonne (Grundlast)
 var LEISTUNG_SANFT  = 1500;   // W
@@ -253,6 +260,12 @@ schedule('2 8-17 * * *', function() {
         leistung = basisLeistung;
         grund    = 'PV moderat unter Prognose (' + (pvVerhaeltnis * 100).toFixed(0) + '%) → Basisleistung ' + leistung + 'W';
         log_info(grund);
+
+    // Niedrige Tagesprognose → sofort Maximum (schlechter Tag, jede kWh zählt)
+    } else if (tagesPrognose !== null && tagesPrognose < PV_PROGNOSE_NIEDRIG) {
+        leistung = MAX_LEISTUNG;
+        grund    = 'Niedrige Tagesprognose (' + (tagesPrognose / 1000).toFixed(0) + ' kWh < ' + (PV_PROGNOSE_NIEDRIG / 1000) + ' kWh) → sofort ' + MAX_LEISTUNG + 'W';
+        log_warn(grund);
 
     // Viel PV prognostiziert UND alles im Plan → sanft laden
     } else if (tagesPrognose !== null && tagesPrognose >= PV_PROGNOSE_HOCH) {

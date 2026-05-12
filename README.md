@@ -23,6 +23,9 @@ Das Skript läuft **stündlich um :02** (pvforecast aktualisiert bei :00:30) und
 3. **Kumulierter SOC-Rückstand** – Summe der stündlichen Abweichungen zwischen erwartetem SOC-Anstieg (basierend auf Basisleistung der Vorperiode) und tatsächlichem Anstieg  
    `> 10%` → sofort MAX | `5–10%` → Basisleistung × 1,5
 
+4. **Dreistufige Forecast-Logik** – Tagesprognose bestimmt Grundverhalten  
+   `< 35 kWh` → sofort MAX (schlechter Tag) | `35–40 kWh` → Basisleistung | `> 40 kWh` → sanft (1500W)
+
 Außerhalb des aktiven Zeitfensters (08:00–17:00 Uhr) wird MAX_LEISTUNG freigegeben und der Wechselrichter regelt selbst.
 
 ## Datenpunkte
@@ -75,7 +78,8 @@ Alle Parameter stehen im Abschnitt `KONFIGURATION` am Anfang des Skripts:
 | `MIN_LEISTUNG` | `500` | Minimale Ladeleistung in W |
 | `START_STUNDE` | `8` | Steuerung aktiv ab (Uhr) |
 | `END_STUNDE` | `17` | Steuerung aktiv bis (Uhr) |
-| `PV_PROGNOSE_HOCH` | `40000` | Schwellwert "viel PV" in Wh (Anlage max ~60 kWh) |
+| `PV_PROGNOSE_NIEDRIG` | `35000` | Schwellwert "schlechter Tag" in Wh → sofort MAX_LEISTUNG |
+| `PV_PROGNOSE_HOCH` | `40000` | Schwellwert "guter Tag" in Wh → sanft laden |
 | `LEISTUNG_SANFT` | `1500` | Leistung bei viel Sonne und Plan OK in W |
 | `RUECKSTAND_MODERAT` | `5` | SOC-Rückstand % → Leistung × 1,5 |
 | `RUECKSTAND_KRITISCH` | `10` | SOC-Rückstand % → sofort MAX_LEISTUNG |

@@ -1,6 +1,6 @@
 # Sungrow SH10RT – Adaptive Ladesteuerung
 
-**Version:** 1.0.4  
+**Version:** 1.0.6  
 **Plattform:** ioBroker JavaScript Adapter  
 **Wechselrichter:** Sungrow SH10RT-20  
 **Batterie:** Sungrow SBR096 (9,6 kWh)
@@ -97,8 +97,9 @@ Die Priorität ist von oben nach unten:
 4. **PV-Verhältnis < 70%** → sofort MAX_LEISTUNG
 5. **Kumulierter Rückstand 5–10%** → Basisleistung × 1,5
 6. **PV-Verhältnis 70–90%** → Basisleistung
-7. **Viel PV (Tagesprognose > 40 kWh) + alles im Plan** → max(Basisleistung, 1500W)
-8. **Normalbetrieb** → Basisleistung
+7. **Niedrige Tagesprognose (< 35 kWh)** → sofort MAX_LEISTUNG (schlechter Tag)
+8. **Viel PV (Tagesprognose > 40 kWh) + alles im Plan** → max(Basisleistung, 1500W)
+9. **Normalbetrieb (35–40 kWh)** → Basisleistung
 
 ### Schreibschutz
 
@@ -132,7 +133,8 @@ Alle Parameter stehen am Anfang des Skripts im Abschnitt `KONFIGURATION`:
 | `MIN_LEISTUNG` | `500` | Minimale Ladeleistung in W |
 | `START_STUNDE` | `8` | Steuerung aktiv ab (Uhr) |
 | `END_STUNDE` | `17` | Steuerung aktiv bis (Uhr) |
-| `PV_PROGNOSE_HOCH` | `40000` | Schwellwert "viel PV" in Wh. Anlage max ~60 kWh; empirisch (09.05.2026): 30 kWh Produktion reichte für volle Batterie + Einspeisung |
+| `PV_PROGNOSE_NIEDRIG` | `35000` | Schwellwert "schlechter Tag" in Wh → sofort MAX_LEISTUNG. Empirisch (10.05.2026): bei 28 kWh Prognose war Batterie abends nur 10% – zu konservativ geladen |
+| `PV_PROGNOSE_HOCH` | `40000` | Schwellwert "guter Tag" in Wh → sanft laden. Empirisch (09.05.2026): 30 kWh Produktion reichte für volle Batterie + Einspeisung |
 | `LEISTUNG_SANFT` | `1500` | Leistung bei viel Sonne und Plan OK |
 | `RUECKSTAND_MODERAT` | `5` | SOC-Rückstand % → Leistung × 1,5 |
 | `RUECKSTAND_KRITISCH` | `10` | SOC-Rückstand % → sofort MAX_LEISTUNG |
