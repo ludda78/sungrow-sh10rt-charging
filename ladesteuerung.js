@@ -1,11 +1,15 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.0.7
+// Version: 1.0.8
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.0.8 – 2026-05-13
+//   - Endladephase: wenn Basisleistung < MIN_LEISTUNG, Release MAX statt
+//     auf MIN zu clampen → WR übernimmt CV-Phase und regelt Trickle selbst
+//
 // v1.0.7 – 2026-05-13
 //   - Logikfehler: kumulierter Rückstand war Einwegzähler (nur +), ignorierte
 //     Überschuss-Stunden. Jetzt Netto-Saldo: Mehrladung reduziert Rückstand wieder.
@@ -199,6 +203,15 @@ schedule('2 8-17 * * *', function() {
         log_warn('Zieluhrzeit ' + ZIEL_UHRZEIT + ':00 überschritten – volle Leistung');
         schreibeLeistung(MAX_LEISTUNG, 'Zieluhrzeit überschritten');
         socVorEinerStunde = soc;
+        return;
+    }
+
+    // --- Endladephase: Basisleistung unter Minimum → WR übernimmt CV-Phase ---
+    if (basisLeistung < MIN_LEISTUNG) {
+        log_info('Endladephase – Basisleistung ' + basisLeistung + 'W < MIN_LEISTUNG → WR regelt Endladung selbst');
+        basisLeistungVorigeStunde = basisLeistung;
+        socVorEinerStunde = soc;
+        schreibeLeistung(MAX_LEISTUNG, 'Endladephase (Basisleistung ' + basisLeistung + 'W < ' + MIN_LEISTUNG + 'W) → WR übernimmt');
         return;
     }
 
