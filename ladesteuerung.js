@@ -1,11 +1,16 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.0.6
+// Version: 1.0.7
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.0.7 – 2026-05-13
+//   - Logikfehler: kumulierter Rückstand war Einwegzähler (nur +), ignorierte
+//     Überschuss-Stunden. Jetzt Netto-Saldo: Mehrladung reduziert Rückstand wieder.
+//     Log zeigt signed Differenz (+ = Rückstand, - = Vorsprung)
+//
 // v1.0.6 – 2026-05-12
 //   - Dreistufige Forecast-Logik: neuer Parameter PV_PROGNOSE_NIEDRIG (35 kWh)
 //     Forecast < 35 kWh → sofort MAX_LEISTUNG (schlechter Tag, jede kWh zählt)
@@ -219,11 +224,11 @@ schedule('2 8-17 * * *', function() {
     if (socVorEinerStunde !== null && basisLeistungVorigeStunde !== null) {
         var socAnstiegIst         = soc - socVorEinerStunde;
         var socAnstiegErwartet    = Math.round(basisLeistungVorigeStunde / 1000 / BATTERIE_KWH * 100);
-        var rueckstandDieseStunde = Math.max(0, Math.round((socAnstiegErwartet - socAnstiegIst) * 10) / 10);
-        kumulierterRueckstand    += rueckstandDieseStunde;
+        var differenzDieseStunde  = Math.round((socAnstiegErwartet - socAnstiegIst) * 10) / 10;
+        kumulierterRueckstand     = Math.max(0, kumulierterRueckstand + differenzDieseStunde);
 
         log_info('SOC-Anstieg: erwartet ' + socAnstiegErwartet + '% / tatsächlich ' + socAnstiegIst.toFixed(1) + '% | ' +
-                 'Rückstand diese Stunde: ' + rueckstandDieseStunde.toFixed(1) + '% | ' +
+                 'Differenz: ' + (differenzDieseStunde > 0 ? '+' : '') + differenzDieseStunde.toFixed(1) + '% | ' +
                  'Kumulierter Rückstand: ' + kumulierterRueckstand.toFixed(1) + '%');
     } else {
         log_info('SOC-Rückstand: noch kein Vorwert (erste Stunde)');
