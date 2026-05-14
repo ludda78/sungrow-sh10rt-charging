@@ -1,11 +1,16 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.1.1
+// Version: 1.1.2
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.1.2 – 2026-05-14
+//   - Einspeisebegrenzungs-Monitor: stufenweise Erhöhung statt Sprung auf MAX
+//     Jede Minute +EINSPEISUNG_SCHRITT (1000W) solange Einspeisung über Schwelle
+//     Gibt WR/Batterie Zeit zu reagieren bevor nächste Stufe folgt
+//
 // v1.1.1 – 2026-05-14
 //   - Einspeisebegrenzungs-Monitor: neuer Minutentakt (8–17 Uhr)
 //     liest alias.0.Elektro.Zaehler.power; wenn Einspeisung das Limit
@@ -100,7 +105,8 @@ var PV_DECKUNG_MIN  = 1.5;    // Forecast muss mind. 1.5× den Batteriebedarf de
 
 // Einspeisebegrenzungs-Monitor (Minutentakt)
 var EINSPEISUNG_LIMIT  = 6000; // W – konfigurierte Einspeisebegrenzung (Betrag)
-var EINSPEISUNG_PUFFER =  500; // W – Abstand zur Grenze, ab dem Ladeleistung auf MAX gesetzt wird
+var EINSPEISUNG_PUFFER =  500; // W – Abstand zur Grenze, ab dem erhöht wird (Trigger bei -5500W)
+var EINSPEISUNG_SCHRITT= 1000; // W – Erhöhung pro Minute solange Einspeisung über Schwelle
 
 // ============================================================
 // DATENPUNKTE
@@ -342,6 +348,8 @@ schedule('* 8-17 * * *', function() {
 
     // Bereits auf MAX – stündliche Logik normalisiert bei nächstem Durchlauf
     if (letzterWert === MAX_LEISTUNG) return;
+    // Kein vorheriger Wert – stündliche Logik macht ersten Schreibvorgang
+    if (letzterWert === null) return;
 
     var netz = getState(DP_NETZ).val;
     if (netz === null) return;
@@ -349,10 +357,11 @@ schedule('* 8-17 * * *', function() {
     var schwelle = -(EINSPEISUNG_LIMIT - EINSPEISUNG_PUFFER); // z.B. -5500W
     if (netz < schwelle) {
         var einspWatt = Math.abs(netz);
-        var grund = 'Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW ≥ Schwelle ' +
-                    ((EINSPEISUNG_LIMIT - EINSPEISUNG_PUFFER) / 1000).toFixed(1) + ' kW → MAX laden';
-        log_warn(grund);
-        schreibeLeistung(MAX_LEISTUNG, 'Einspeisebegrenzung (' + (einspWatt / 1000).toFixed(1) + ' kW / ' + (EINSPEISUNG_LIMIT / 1000) + ' kW Limit)');
+        var neueLeistung = letzterWert + EINSPEISUNG_SCHRITT;
+        log_warn('Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW ≥ Schwelle ' +
+                 ((EINSPEISUNG_LIMIT - EINSPEISUNG_PUFFER) / 1000).toFixed(1) +
+                 ' kW → +' + EINSPEISUNG_SCHRITT + 'W auf ' + Math.min(neueLeistung, MAX_LEISTUNG) + 'W');
+        schreibeLeistung(neueLeistung, 'Einspeisebegrenzung (' + (einspWatt / 1000).toFixed(1) + ' kW / ' + (EINSPEISUNG_LIMIT / 1000) + ' kW Limit)');
     }
 });
 
