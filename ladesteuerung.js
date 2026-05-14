@@ -1,11 +1,18 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.0.8
+// Version: 1.0.9
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.0.9 – 2026-05-14
+//   - PV-Alarm kombiniert jetzt historischen Ratio MIT Forward-looking Coverage:
+//     Ratio < 70% löst MAX nur aus wenn Deckungsgrad (pvNochWh/fehlendeWh) < 1.5×
+//     Verhindert Fehlalarme bei kleinen frühmorgendlichen Stichproben
+//   - Neuer Parameter PV_DECKUNG_MIN (Standard: 1.5)
+//   - Log zeigt Deckungsgrad bei jeder PV-Prüfung
+//
 // v1.0.8 – 2026-05-13
 //   - Endladephase: wenn Basisleistung < MIN_LEISTUNG, Release MAX statt
 //     auf MIN zu clampen → WR übernimmt CV-Phase und regelt Trickle selbst
@@ -78,7 +85,11 @@ var RUECKSTAND_KRITISCH = 10; // % – sofort auf MAX_LEISTUNG
 // PV-Verhältnis Schwellen (tatsächlich / prognostiziert)
 var PV_VERH_GUT     = 0.9;    // über 90% → Plan hält
 var PV_VERH_MODERAT = 0.7;    // 70–90% → etwas erhöhen
-                               // unter 70% → sofort MAX_LEISTUNG
+                               // unter 70% → MAX, aber nur wenn Deckungsgrad auch knapp
+
+// Mindest-Deckungsgrad: pvNochWh / fehlendeWh – PV-Alarm greift nur wenn Forecast
+// den Restbedarf nicht mehr ausreichend abdeckt (verhindert Fehlalarme bei kleinen Samples)
+var PV_DECKUNG_MIN  = 1.5;    // Forecast muss mind. 1.5× den Batteriebedarf decken
 
 // ============================================================
 // DATENPUNKTE
@@ -182,8 +193,10 @@ schedule('2 8-17 * * *', function() {
     var pvHeuteWh   = pvHeuteKwh * 1000;                           // in Wh umrechnen
     var pvNowWh     = getState(DP_PV_NOW).val;                     // Wh – Prognose für bereits vergangene Zeit
     var pvNochWh    = getState(DP_PV_PROGNOSE).val;                // Wh – noch zu erwarten heute
-    var restStunden = Math.max(0, ZIEL_UHRZEIT - stunde);
+    var restStunden   = Math.max(0, ZIEL_UHRZEIT - stunde);
     var basisLeistung = berechneBasisleistung(soc, restStunden);
+    var fehlendeWh    = Math.max(0, ZIEL_SOC - soc) / 100 * BATTERIE_KWH * 1000;
+    var pvDeckungsgrad = fehlendeWh > 0 ? pvNochWh / fehlendeWh : 999;
 
     log_info('SOC: ' + soc + '% | PV heute: ' + pvHeuteKwh.toFixed(1) + ' kWh | ' +
              'PV Prognose noch: ' + (pvNochWh / 1000).toFixed(1) + ' kWh | ' +
@@ -229,7 +242,10 @@ schedule('2 8-17 * * *', function() {
                             (pvNowWh / 1000).toFixed(1) + ' kWh)';
     }
 
-    log_info('PV-Verhältnis: ' + pvVerhaeltnisText);
+    log_info('PV-Verhältnis: ' + pvVerhaeltnisText +
+             ' | Deckungsgrad: ' + pvDeckungsgrad.toFixed(1) + '× (' +
+             (pvNochWh / 1000).toFixed(1) + ' kWh Prognose / ' +
+             (fehlendeWh / 1000).toFixed(1) + ' kWh Bedarf)');
 
     // -------------------------------------------------------
     // ENTSCHEIDUNG 2: SOC-Rückstand prüfen
@@ -261,11 +277,19 @@ schedule('2 8-17 * * *', function() {
         grund    = 'KRITISCHER SOC-Rückstand (' + kumulierterRueckstand.toFixed(1) + '% kumuliert) → sofort ' + MAX_LEISTUNG + 'W';
         log_warn(grund);
 
-    // PV deutlich schlechter als erwartet → Maximum
-    } else if (pvVerhaeltnis !== null && pvVerhaeltnis < PV_VERH_MODERAT) {
+    // PV deutlich schlechter als erwartet UND Forecast deckt Bedarf nicht mehr → Maximum
+    } else if (pvVerhaeltnis !== null && pvVerhaeltnis < PV_VERH_MODERAT && pvDeckungsgrad < PV_DECKUNG_MIN) {
         leistung = MAX_LEISTUNG;
-        grund    = 'PV deutlich unter Prognose (' + (pvVerhaeltnis * 100).toFixed(0) + '%) → sofort ' + MAX_LEISTUNG + 'W';
+        grund    = 'PV unter Prognose (' + (pvVerhaeltnis * 100).toFixed(0) + '%) + Deckungsgrad ' +
+                   pvDeckungsgrad.toFixed(1) + '× < ' + PV_DECKUNG_MIN + '× → sofort ' + MAX_LEISTUNG + 'W';
         log_warn(grund);
+
+    // PV deutlich schlechter, aber Forecast deckt Bedarf noch → Basisleistung
+    } else if (pvVerhaeltnis !== null && pvVerhaeltnis < PV_VERH_MODERAT) {
+        leistung = basisLeistung;
+        grund    = 'PV unter Prognose (' + (pvVerhaeltnis * 100).toFixed(0) + '%) aber Deckungsgrad ' +
+                   pvDeckungsgrad.toFixed(1) + '× ≥ ' + PV_DECKUNG_MIN + '× → Basisleistung ' + leistung + 'W';
+        log_info(grund);
 
     // Moderater SOC-Rückstand → Basisleistung × 1.5
     } else if (kumulierterRueckstand >= RUECKSTAND_MODERAT) {

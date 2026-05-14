@@ -1,6 +1,6 @@
 # Sungrow SH10RT – Adaptive Ladesteuerung
 
-**Version:** 1.0.6  
+**Version:** 1.0.9  
 **Plattform:** ioBroker JavaScript Adapter  
 **Wechselrichter:** Sungrow SH10RT-20  
 **Batterie:** Sungrow SBR096 (9,6 kWh)
@@ -51,15 +51,21 @@ Stündlicher Vergleich: tatsächliche Erzeugung vs. was laut Prognose bis jetzt 
 
 ```
 PV-Verhältnis = pv_energy_today (Wh) / pvforecast.energy.now (Wh)
+Deckungsgrad  = pvNochWh (Wh) / fehlendeWh (Wh)
 ```
 
 Der Vergleich ist erst ab 500 Wh Prognosewert sinnvoll (früh morgens zu wenig Datenbasis). Darunter wird das Verhältnis als unbekannt geloggt.
 
-| Verhältnis | Bedeutung | Reaktion |
-|------------|-----------|----------|
-| > 90% | Prognose stimmt | Plan beibehalten |
-| 70–90% | Etwas schwächer | Basisleistung verwenden |
-| < 70% | Deutlich schlechter | Sofort MAX_LEISTUNG |
+**Problem kleiner Stichproben**: Früh morgens (z.B. 0.4/0.7 kWh) hat das Ratio kaum Aussagekraft. Deshalb wird der PV-Alarm mit dem **Deckungsgrad** kombiniert: Nur wenn der verbleibende Forecast den Restbedarf nicht ausreichend abdeckt, greift MAX.
+
+| Verhältnis | Deckungsgrad | Reaktion |
+|------------|-------------|----------|
+| > 90% | – | Plan beibehalten |
+| 70–90% | – | Basisleistung verwenden |
+| < 70% | ≥ 1.5× | Basisleistung (Forecast deckt Bedarf noch) |
+| < 70% | < 1.5× | Sofort MAX_LEISTUNG (Ratio UND Forecast knapp) |
+
+**Beispiel 8 Uhr**: Ratio 57% (0.4/0.7 kWh), aber Deckungsgrad 4.2× (39.5/9.4 kWh) → kein Alarm, Basisleistung.
 
 #### 3. SOC-Rückstand (kumuliert)
 
@@ -93,13 +99,15 @@ Die Priorität ist von oben nach unten:
 
 1. **SOC bereits 100%** → MAX freigeben, WR regelt selbst
 2. **Zeit überschritten (nach 16:00)** → MAX freigeben
-3. **Kumulierter Rückstand > 10%** → sofort MAX_LEISTUNG
-4. **PV-Verhältnis < 70%** → sofort MAX_LEISTUNG
-5. **Kumulierter Rückstand 5–10%** → Basisleistung × 1,5
-6. **PV-Verhältnis 70–90%** → Basisleistung
-7. **Niedrige Tagesprognose (< 35 kWh)** → sofort MAX_LEISTUNG (schlechter Tag)
-8. **Viel PV (Tagesprognose > 40 kWh) + alles im Plan** → max(Basisleistung, 1500W)
-9. **Normalbetrieb (35–40 kWh)** → Basisleistung
+3. **Basisleistung < MIN_LEISTUNG** → Endladephase, MAX freigeben, WR/BMS regelt CV-Phase
+4. **Kumulierter Rückstand > 10%** → sofort MAX_LEISTUNG
+5. **PV-Verhältnis < 70% UND Deckungsgrad < 1.5×** → sofort MAX_LEISTUNG
+6. **PV-Verhältnis < 70% aber Deckungsgrad ≥ 1.5×** → Basisleistung (Forecast deckt Bedarf)
+7. **Kumulierter Rückstand 5–10%** → Basisleistung × 1,5
+8. **PV-Verhältnis 70–90%** → Basisleistung
+9. **Niedrige Tagesprognose (< 35 kWh)** → sofort MAX_LEISTUNG (schlechter Tag)
+10. **Viel PV (Tagesprognose > 40 kWh) + alles im Plan** → max(Basisleistung, 1500W)
+11. **Normalbetrieb (35–40 kWh)** → Basisleistung
 
 ### Schreibschutz
 
@@ -139,7 +147,8 @@ Alle Parameter stehen am Anfang des Skripts im Abschnitt `KONFIGURATION`:
 | `RUECKSTAND_MODERAT` | `5` | SOC-Rückstand % → Leistung × 1,5 |
 | `RUECKSTAND_KRITISCH` | `10` | SOC-Rückstand % → sofort MAX_LEISTUNG |
 | `PV_VERH_GUT` | `0.9` | PV-Verhältnis ab dem Plan als "gut" gilt |
-| `PV_VERH_MODERAT` | `0.7` | PV-Verhältnis ab dem sofort MAX_LEISTUNG |
+| `PV_VERH_MODERAT` | `0.7` | PV-Verhältnis unterhalb dem MAX erwogen wird |
+| `PV_DECKUNG_MIN` | `1.5` | Mindest-Deckungsgrad (verbl. Forecast / Restbedarf) für PV-Alarm |
 
 ---
 

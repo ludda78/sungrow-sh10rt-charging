@@ -18,7 +18,8 @@ Das Skript läuft **stündlich um :02** (pvforecast aktualisiert bei :00:30) und
    `(fehlende kWh bis 100%) / (Stunden bis Zielzeit) × 1000`
 
 2. **PV-Verhältnis** – Vergleich tatsächliche Erzeugung vs. Prognose bis jetzt  
-   `< 70%` → sofort MAX | `70–90%` → Basisleistung | `> 90%` → Plan beibehalten
+   `< 70%` → MAX (aber nur wenn Deckungsgrad < 1.5×) | `70–90%` → Basisleistung | `> 90%` → Plan beibehalten  
+   **Deckungsgrad** = verbleibender Forecast / noch benötigte kWh – verhindert Fehlalarme bei kleinen Morgenstichproben
 
 3. **Kumulierter SOC-Rückstand** – Summe der stündlichen Abweichungen zwischen erwartetem SOC-Anstieg (basierend auf Basisleistung der Vorperiode) und tatsächlichem Anstieg  
    `> 10%` → sofort MAX | `5–10%` → Basisleistung × 1,5
@@ -84,7 +85,8 @@ Alle Parameter stehen im Abschnitt `KONFIGURATION` am Anfang des Skripts:
 | `RUECKSTAND_MODERAT` | `5` | SOC-Rückstand % → Leistung × 1,5 |
 | `RUECKSTAND_KRITISCH` | `10` | SOC-Rückstand % → sofort MAX_LEISTUNG |
 | `PV_VERH_GUT` | `0.9` | PV-Verhältnis ab dem Plan als gut gilt |
-| `PV_VERH_MODERAT` | `0.7` | PV-Verhältnis ab dem sofort MAX_LEISTUNG |
+| `PV_VERH_MODERAT` | `0.7` | PV-Verhältnis unterhalb dem MAX erwogen wird |
+| `PV_DECKUNG_MIN` | `1.5` | Mindest-Deckungsgrad (Forecast/Bedarf) für PV-Alarm |
 
 ## Logging
 
