@@ -1,11 +1,17 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.0.9
+// Version: 1.1.0
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.1.0 – 2026-05-14
+//   - Vereinfachung: 3-stufige Forecast-Logik → 2-stufig
+//     PV_PROGNOSE_NIEDRIG + PV_PROGNOSE_HOCH + LEISTUNG_SANFT entfernt
+//     Neu: PV_PROGNOSE_SCHWELLE = 45 kWh
+//     < 45 kWh → MAX | ≥ 45 kWh → Basisleistung
+//
 // v1.0.9 – 2026-05-14
 //   - PV-Alarm kombiniert jetzt historischen Ratio MIT Forward-looking Coverage:
 //     Ratio < 70% löst MAX nur aus wenn Deckungsgrad (pvNochWh/fehlendeWh) < 1.5×
@@ -70,13 +76,8 @@ var MIN_LEISTUNG    = 500;     // W – Minimum (verhindert Abbruch des Ladevorg
 var START_STUNDE    = 8;       // Uhr – Steuerung aktiv ab (erste Stunde dient als Referenz für SOC-Rückstand)
 var END_STUNDE      = 17;      // Uhr – Steuerung aktiv bis (letzte adaptive Entscheidung um END_STUNDE-1 Uhr)
 
-// PV-Prognose Schwellwerte (Dreistufig)
-var PV_PROGNOSE_NIEDRIG = 35000; // Wh – schlechter Tag → sofort MAX_LEISTUNG
-var PV_PROGNOSE_HOCH    = 40000; // Wh – guter Tag → sanft mit LEISTUNG_SANFT
-                                  //   < 35 kWh → MAX | 35–40 kWh → Basis | > 40 kWh → sanft
-
-// Leistung bei viel Sonne (Grundlast)
-var LEISTUNG_SANFT  = 1500;   // W
+// PV-Prognose Schwellwert: unter diesem Wert immer MAX laden
+var PV_PROGNOSE_SCHWELLE = 45000; // Wh – < 45 kWh → MAX | ≥ 45 kWh → Basisleistung
 
 // SOC-Rückstand Schwellen (kumuliert über den Tag)
 var RUECKSTAND_MODERAT  = 5;  // % – Leistung um 50% erhöhen
@@ -303,22 +304,16 @@ schedule('2 8-17 * * *', function() {
         grund    = 'PV moderat unter Prognose (' + (pvVerhaeltnis * 100).toFixed(0) + '%) → Basisleistung ' + leistung + 'W';
         log_info(grund);
 
-    // Niedrige Tagesprognose → sofort Maximum (schlechter Tag, jede kWh zählt)
-    } else if (tagesPrognose !== null && tagesPrognose < PV_PROGNOSE_NIEDRIG) {
+    // Forecast unter Schwelle → MAX (unsicherer Tag, jede kWh zählt)
+    } else if (tagesPrognose !== null && tagesPrognose < PV_PROGNOSE_SCHWELLE) {
         leistung = MAX_LEISTUNG;
-        grund    = 'Niedrige Tagesprognose (' + (tagesPrognose / 1000).toFixed(0) + ' kWh < ' + (PV_PROGNOSE_NIEDRIG / 1000) + ' kWh) → sofort ' + MAX_LEISTUNG + 'W';
+        grund    = 'Forecast ' + (tagesPrognose / 1000).toFixed(0) + ' kWh < ' + (PV_PROGNOSE_SCHWELLE / 1000) + ' kWh → sofort ' + MAX_LEISTUNG + 'W';
         log_warn(grund);
 
-    // Viel PV prognostiziert UND alles im Plan → sanft laden
-    } else if (tagesPrognose !== null && tagesPrognose >= PV_PROGNOSE_HOCH) {
-        leistung = Math.max(basisLeistung, LEISTUNG_SANFT);
-        grund    = 'Viel PV (' + (tagesPrognose / 1000).toFixed(0) + ' kWh Tagesprognose) + im Plan → sanft ' + leistung + 'W';
-        log_info(grund);
-
-    // Alles normal → Basisleistung
+    // Guter Tag → Basisleistung (adaptiv)
     } else {
         leistung = basisLeistung;
-        grund    = 'Normalbetrieb → Basisleistung ' + leistung + 'W';
+        grund    = 'Guter Tag (' + (tagesPrognose !== null ? (tagesPrognose / 1000).toFixed(0) : '?') + ' kWh) → Basisleistung ' + leistung + 'W';
         log_info(grund);
     }
 
