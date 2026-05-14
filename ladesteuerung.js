@@ -1,11 +1,17 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.1.0
+// Version: 1.1.1
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.1.1 – 2026-05-14
+//   - Einspeisebegrenzungs-Monitor: neuer Minutentakt (8–17 Uhr)
+//     liest alias.0.Elektro.Zaehler.power; wenn Einspeisung das Limit
+//     minus Puffer überschreitet → sofort MAX_LEISTUNG setzen
+//     Neue Parameter: EINSPEISUNG_LIMIT, EINSPEISUNG_PUFFER, DP_NETZ
+//
 // v1.1.0 – 2026-05-14
 //   - Vereinfachung: 3-stufige Forecast-Logik → 2-stufig
 //     PV_PROGNOSE_NIEDRIG + PV_PROGNOSE_HOCH + LEISTUNG_SANFT entfernt
@@ -92,6 +98,10 @@ var PV_VERH_MODERAT = 0.7;    // 70–90% → etwas erhöhen
 // den Restbedarf nicht mehr ausreichend abdeckt (verhindert Fehlalarme bei kleinen Samples)
 var PV_DECKUNG_MIN  = 1.5;    // Forecast muss mind. 1.5× den Batteriebedarf decken
 
+// Einspeisebegrenzungs-Monitor (Minutentakt)
+var EINSPEISUNG_LIMIT  = 6000; // W – konfigurierte Einspeisebegrenzung (Betrag)
+var EINSPEISUNG_PUFFER =  500; // W – Abstand zur Grenze, ab dem Ladeleistung auf MAX gesetzt wird
+
 // ============================================================
 // DATENPUNKTE
 // ============================================================
@@ -100,6 +110,7 @@ var DP_SOC          = 'modbus.0.inputRegisters.13022_Battery_level_';
 var DP_PV_HEUTE     = 'modbus.0.inputRegisters.13001_Daily_PV_Generation';   // kWh
 var DP_PV_PROGNOSE  = 'pvforecast.0.summary.energy.nowUntilEndOfDay';        // Wh – noch zu erwarten
 var DP_PV_NOW       = 'pvforecast.0.summary.energy.now';                     // Wh – heute laut Prognose bereits erzeugt
+var DP_NETZ              = 'alias.0.Elektro.Zaehler.power';                         // W – negativ = Einspeisung ins Netz
 var DP_HR_LADEN          = 'modbus.0.holdingRegisters.33046_Max_Charging_Power';  // W
 var DP_SCHREIBZYKLEN     = 'javascript.0.ladesteuerung.schreibzyklen';            // Schreibvorgänge heute
 var DP_SCHREIBZYKLEN_GES = 'javascript.0.ladesteuerung.schreibzyklen_gesamt';     // Schreibvorgänge gesamt
@@ -319,6 +330,30 @@ schedule('2 8-17 * * *', function() {
 
     basisLeistungVorigeStunde = basisLeistung;
     schreibeLeistung(leistung, grund);
+});
+
+// ============================================================
+// EINSPEISEBEGRENZUNGS-MONITOR – läuft jede Minute
+// ============================================================
+
+schedule('* 8-17 * * *', function() {
+    var stunde = new Date().getHours();
+    if (stunde < START_STUNDE || stunde >= END_STUNDE) return;
+
+    // Bereits auf MAX – stündliche Logik normalisiert bei nächstem Durchlauf
+    if (letzterWert === MAX_LEISTUNG) return;
+
+    var netz = getState(DP_NETZ).val;
+    if (netz === null) return;
+
+    var schwelle = -(EINSPEISUNG_LIMIT - EINSPEISUNG_PUFFER); // z.B. -5500W
+    if (netz < schwelle) {
+        var einspWatt = Math.abs(netz);
+        var grund = 'Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW ≥ Schwelle ' +
+                    ((EINSPEISUNG_LIMIT - EINSPEISUNG_PUFFER) / 1000).toFixed(1) + ' kW → MAX laden';
+        log_warn(grund);
+        schreibeLeistung(MAX_LEISTUNG, 'Einspeisebegrenzung (' + (einspWatt / 1000).toFixed(1) + ' kW / ' + (EINSPEISUNG_LIMIT / 1000) + ' kW Limit)');
+    }
 });
 
 createState('ladesteuerung.schreibzyklen',     0, false, { name: 'Ladesteuerung – Schreibzyklen heute',  type: 'number', role: 'value', unit: '' });
