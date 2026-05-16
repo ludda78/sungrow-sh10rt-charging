@@ -103,10 +103,11 @@ var PV_VERH_MODERAT = 0.7;    // 70–90% → etwas erhöhen
 // den Restbedarf nicht mehr ausreichend abdeckt (verhindert Fehlalarme bei kleinen Samples)
 var PV_DECKUNG_MIN  = 1.5;    // Forecast muss mind. 1.5× den Batteriebedarf decken
 
-// Einspeisebegrenzungs-Monitor (Minutentakt)
+// Einspeisebegrenzungs-Monitor (deaktiviert – Konzept noch offen)
+var EINSPEISUNG_MONITOR = false; // true = Monitor aktiv
 var EINSPEISUNG_LIMIT  = 6000; // W – konfigurierte Einspeisebegrenzung (Betrag)
 var EINSPEISUNG_PUFFER =  500; // W – Abstand zur Grenze, ab dem erhöht wird (Trigger bei -5500W)
-var EINSPEISUNG_SCHRITT= 1000; // W – Erhöhung pro Minute solange Einspeisung über Schwelle
+var EINSPEISUNG_SCHRITT= 1000; // W – Erhöhung pro Schritt
 
 // ============================================================
 // DATENPUNKTE
@@ -343,6 +344,7 @@ schedule('2 8-17 * * *', function() {
 // ============================================================
 
 schedule('* 8-17 * * *', function() {
+    if (!EINSPEISUNG_MONITOR) return;
     var stunde = new Date().getHours();
     if (stunde < START_STUNDE || stunde >= END_STUNDE) return;
 
