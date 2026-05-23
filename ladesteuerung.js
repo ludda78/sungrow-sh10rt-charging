@@ -1,11 +1,18 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.1.2
+// Version: 1.1.3
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.1.3 – 2026-05-23
+//   - Einspeisebegrenzungs-Monitor: 10-Minuten-Takt statt Minutentakt
+//     Pro Prüfung max. ein Schritt (+1000W); gibt WR Zeit zu reagieren
+//   - Telegram-Integration: bei Auto-Schritt kommt Nachricht mit Button
+//     "+1000W" für weitere manuelle Erhöhung, Kette beliebig oft wiederholbar
+//     Neue Parameter: TELEGRAM_INSTANZ
+//
 // v1.1.2 – 2026-05-14
 //   - Einspeisebegrenzungs-Monitor: stufenweise Erhöhung statt Sprung auf MAX
 //     Jede Minute +EINSPEISUNG_SCHRITT (1000W) solange Einspeisung über Schwelle
@@ -103,11 +110,12 @@ var PV_VERH_MODERAT = 0.7;    // 70–90% → etwas erhöhen
 // den Restbedarf nicht mehr ausreichend abdeckt (verhindert Fehlalarme bei kleinen Samples)
 var PV_DECKUNG_MIN  = 1.5;    // Forecast muss mind. 1.5× den Batteriebedarf decken
 
-// Einspeisebegrenzungs-Monitor (deaktiviert – Konzept noch offen)
-var EINSPEISUNG_MONITOR = false; // true = Monitor aktiv
-var EINSPEISUNG_LIMIT  = 6000; // W – konfigurierte Einspeisebegrenzung (Betrag)
-var EINSPEISUNG_PUFFER =  500; // W – Abstand zur Grenze, ab dem erhöht wird (Trigger bei -5500W)
-var EINSPEISUNG_SCHRITT= 1000; // W – Erhöhung pro Schritt
+// Einspeisebegrenzungs-Monitor (alle 10 Minuten, +1 Stufe pro Prüfung)
+var EINSPEISUNG_MONITOR  = false; // true = Monitor aktiv
+var EINSPEISUNG_LIMIT    = 6000;  // W – konfigurierte Einspeisebegrenzung (Betrag)
+var EINSPEISUNG_PUFFER   =  500;  // W – Abstand zur Grenze, ab dem erhöht wird (Trigger bei -5500W)
+var EINSPEISUNG_SCHRITT  = 1000;  // W – Erhöhung pro automatischem Schritt (und pro Telegram-Button)
+var TELEGRAM_INSTANZ     = 'telegram.1';
 
 // ============================================================
 // DATENPUNKTE
@@ -343,27 +351,72 @@ schedule('2 8-17 * * *', function() {
 // EINSPEISEBEGRENZUNGS-MONITOR – läuft jede Minute
 // ============================================================
 
-schedule('* 8-17 * * *', function() {
+schedule('*/10 8-17 * * *', function() {
     if (!EINSPEISUNG_MONITOR) return;
     var stunde = new Date().getHours();
     if (stunde < START_STUNDE || stunde >= END_STUNDE) return;
-
-    // Bereits auf MAX – stündliche Logik normalisiert bei nächstem Durchlauf
-    if (letzterWert === MAX_LEISTUNG) return;
-    // Kein vorheriger Wert – stündliche Logik macht ersten Schreibvorgang
-    if (letzterWert === null) return;
+    if (letzterWert === null) return;        // warten bis stündliche Logik erstmals geschrieben hat
+    if (letzterWert === MAX_LEISTUNG) return; // bereits auf MAX
 
     var netz = getState(DP_NETZ).val;
     if (netz === null) return;
 
-    var schwelle = -(EINSPEISUNG_LIMIT - EINSPEISUNG_PUFFER); // z.B. -5500W
-    if (netz < schwelle) {
-        var einspWatt = Math.abs(netz);
+    var schwelle = -(EINSPEISUNG_LIMIT - EINSPEISUNG_PUFFER);
+    if (netz >= schwelle) return; // Einspeisung noch im grünen Bereich
+
+    var einspWatt  = Math.abs(netz);
+    var neueLeistung = letzterWert + EINSPEISUNG_SCHRITT;
+    var zielWatt   = Math.min(neueLeistung, MAX_LEISTUNG);
+
+    log_warn('Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW ≥ Schwelle ' +
+             ((EINSPEISUNG_LIMIT - EINSPEISUNG_PUFFER) / 1000).toFixed(1) +
+             ' kW → +' + EINSPEISUNG_SCHRITT + 'W auf ' + zielWatt + 'W');
+    schreibeLeistung(neueLeistung, 'Einspeisebegrenzung (' + (einspWatt / 1000).toFixed(1) + ' kW / ' + (EINSPEISUNG_LIMIT / 1000) + ' kW Limit)');
+
+    // Telegram: Meldung + Button für weiteren manuellen Schritt
+    if (zielWatt < MAX_LEISTUNG) {
+        sendTo(TELEGRAM_INSTANZ, 'send', {
+            text: '⚡ Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW – Ladeleistung auf ' + zielWatt + 'W erhöht.\nNoch einen Schritt freigeben?',
+            reply_markup: JSON.stringify({
+                inline_keyboard: [[
+                    { text: '✅ +' + (EINSPEISUNG_SCHRITT / 1000) + ' kW', callback_data: 'einsp_boost' },
+                    { text: '❌ Nein',                                       callback_data: 'einsp_nein'  }
+                ]]
+            })
+        });
+    }
+});
+
+// Telegram Inline-Button Handler
+on({ id: TELEGRAM_INSTANZ + '.communicate.callbackQuery', change: 'ne' }, function(obj) {
+    var cbData = obj.state.val;
+    if (!cbData) return;
+
+    if (cbData === 'einsp_boost') {
+        if (letzterWert === null || letzterWert >= MAX_LEISTUNG) {
+            sendTo(TELEGRAM_INSTANZ, 'send', { text: '⚠️ Bereits bei MAX_LEISTUNG, keine weitere Erhöhung möglich.' });
+            return;
+        }
         var neueLeistung = letzterWert + EINSPEISUNG_SCHRITT;
-        log_warn('Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW ≥ Schwelle ' +
-                 ((EINSPEISUNG_LIMIT - EINSPEISUNG_PUFFER) / 1000).toFixed(1) +
-                 ' kW → +' + EINSPEISUNG_SCHRITT + 'W auf ' + Math.min(neueLeistung, MAX_LEISTUNG) + 'W');
-        schreibeLeistung(neueLeistung, 'Einspeisebegrenzung (' + (einspWatt / 1000).toFixed(1) + ' kW / ' + (EINSPEISUNG_LIMIT / 1000) + ' kW Limit)');
+        var zielWatt     = Math.min(neueLeistung, MAX_LEISTUNG);
+        schreibeLeistung(neueLeistung, 'Manueller Boost via Telegram');
+
+        var antwort = { text: '✅ Ladeleistung auf ' + zielWatt + 'W erhöht.' };
+        if (zielWatt < MAX_LEISTUNG) {
+            antwort.text += '\nNoch einen Schritt?';
+            antwort.reply_markup = JSON.stringify({
+                inline_keyboard: [[
+                    { text: '✅ +' + (EINSPEISUNG_SCHRITT / 1000) + ' kW', callback_data: 'einsp_boost' },
+                    { text: '❌ Nein',                                       callback_data: 'einsp_nein'  }
+                ]]
+            });
+        } else {
+            antwort.text += '\nMaximum erreicht.';
+        }
+        sendTo(TELEGRAM_INSTANZ, 'send', antwort);
+
+    } else if (cbData === 'einsp_nein') {
+        sendTo(TELEGRAM_INSTANZ, 'send', { text: 'OK, keine weitere Erhöhung.' });
     }
 });
 
