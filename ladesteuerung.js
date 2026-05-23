@@ -1,14 +1,15 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.1.5
+// Version: 1.1.6
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
-// v1.1.5 – 2026-05-23
-//   - Fix: tagesPrognose nach Neustart nicht mehr null – wird beim ersten
-//     stündlichen Durchlauf aus pvNochWh + pvNowWh nachberechnet
+// v1.1.6 – 2026-05-23
+//   - tagesPrognose liest jetzt pvforecast.0.summary.energy.today direkt
+//     (Tagesstart + Neustart-Fallback); keine Nachrechnung mehr nötig
+//     Neuer Datenpunkt: DP_PV_TODAY
 //
 // v1.1.4 – 2026-05-23
 //   - Einspeisebegrenzungs-Monitor: klar getrennter 2-Stufen-Ablauf
@@ -136,6 +137,7 @@ var DP_SOC          = 'modbus.0.inputRegisters.13022_Battery_level_';
 var DP_PV_HEUTE     = 'modbus.0.inputRegisters.13001_Daily_PV_Generation';   // kWh
 var DP_PV_PROGNOSE  = 'pvforecast.0.summary.energy.nowUntilEndOfDay';        // Wh – noch zu erwarten
 var DP_PV_NOW       = 'pvforecast.0.summary.energy.now';                     // Wh – heute laut Prognose bereits erzeugt
+var DP_PV_TODAY     = 'pvforecast.0.summary.energy.today';                   // Wh – Tagesprognose gesamt
 var DP_NETZ              = 'alias.0.Elektro.Zaehler.power';                         // W – negativ = Einspeisung ins Netz
 var DP_HR_LADEN          = 'modbus.0.holdingRegisters.33046_Max_Charging_Power';  // W
 var DP_SCHREIBZYKLEN     = 'javascript.0.ladesteuerung.schreibzyklen';            // Schreibvorgänge heute
@@ -212,7 +214,7 @@ schedule('2 8-17 * * *', function() {
 
     // --- Tagesstart: Prognose merken ---
     if (stunde === START_STUNDE) {
-        tagesPrognose              = getState(DP_PV_PROGNOSE).val + getState(DP_PV_NOW).val;
+        tagesPrognose              = getState(DP_PV_TODAY).val;
         kumulierterRueckstand      = 0;
         socVorEinerStunde          = null;
         basisLeistungVorigeStunde  = null;
@@ -238,10 +240,10 @@ schedule('2 8-17 * * *', function() {
     var fehlendeWh    = Math.max(0, ZIEL_SOC - soc) / 100 * BATTERIE_KWH * 1000;
     var pvDeckungsgrad = fehlendeWh > 0 ? pvNochWh / fehlendeWh : 999;
 
-    // Fallback nach Neustart: Tagesprognose aus aktuellen Forecast-Werten ableiten
+    // Fallback nach Neustart: Tagesprognose direkt aus Datenpunkt lesen
     if (tagesPrognose === null) {
-        tagesPrognose = pvNochWh + pvNowWh;
-        log_info('Tagesprognose nach Neustart gesetzt: ' + (tagesPrognose / 1000).toFixed(1) + ' kWh (pvNoch + pvNow)');
+        tagesPrognose = getState(DP_PV_TODAY).val;
+        log_info('Tagesprognose nach Neustart gesetzt: ' + (tagesPrognose / 1000).toFixed(1) + ' kWh');
     }
 
     log_info('SOC: ' + soc + '% | PV heute: ' + pvHeuteKwh.toFixed(1) + ' kWh | ' +
