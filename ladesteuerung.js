@@ -421,8 +421,16 @@ schedule('*/10 8-17 * * *', function() {
 
 // Telegram Inline-Button Handler
 on({ id: TELEGRAM_INSTANZ + '.communicate.callbackQuery', change: 'ne' }, function(obj) {
-    var cbData = obj.state.val;
-    if (!cbData) return;
+    var raw = obj.state.val;
+    log_info('Telegram callbackQuery: ' + JSON.stringify(raw));
+    if (!raw) return;
+
+    // Adapter-Version liefert entweder reinen String oder JSON-Objekt mit .data
+    var cbData = raw;
+    try {
+        var parsed = JSON.parse(raw);
+        if (parsed && parsed.data) cbData = parsed.data;
+    } catch (e) { /* raw ist bereits einfacher String */ }
 
     einspeisungButtonPending = false;
 
