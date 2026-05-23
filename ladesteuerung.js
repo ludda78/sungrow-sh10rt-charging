@@ -1,11 +1,15 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.1.4
+// Version: 1.1.5
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.1.5 – 2026-05-23
+//   - Fix: tagesPrognose nach Neustart nicht mehr null – wird beim ersten
+//     stündlichen Durchlauf aus pvNochWh + pvNowWh nachberechnet
+//
 // v1.1.4 – 2026-05-23
 //   - Einspeisebegrenzungs-Monitor: klar getrennter 2-Stufen-Ablauf
 //     1. Auslöser/Stunde: automatisch +1000W, nur Info-Meldung (kein Button)
@@ -233,6 +237,12 @@ schedule('2 8-17 * * *', function() {
     var basisLeistung = berechneBasisleistung(soc, restStunden);
     var fehlendeWh    = Math.max(0, ZIEL_SOC - soc) / 100 * BATTERIE_KWH * 1000;
     var pvDeckungsgrad = fehlendeWh > 0 ? pvNochWh / fehlendeWh : 999;
+
+    // Fallback nach Neustart: Tagesprognose aus aktuellen Forecast-Werten ableiten
+    if (tagesPrognose === null) {
+        tagesPrognose = pvNochWh + pvNowWh;
+        log_info('Tagesprognose nach Neustart gesetzt: ' + (tagesPrognose / 1000).toFixed(1) + ' kWh (pvNoch + pvNow)');
+    }
 
     log_info('SOC: ' + soc + '% | PV heute: ' + pvHeuteKwh.toFixed(1) + ' kWh | ' +
              'PV Prognose noch: ' + (pvNochWh / 1000).toFixed(1) + ' kWh | ' +
