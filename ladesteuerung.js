@@ -123,7 +123,7 @@ var PV_VERH_MODERAT = 0.7;    // 70–90% → etwas erhöhen
 var PV_DECKUNG_MIN  = 1.5;    // Forecast muss mind. 1.5× den Batteriebedarf decken
 
 // Einspeisebegrenzungs-Monitor (alle 10 Minuten, +1 Stufe pro Prüfung)
-var EINSPEISUNG_MONITOR  = false; // true = Monitor aktiv
+var EINSPEISUNG_MONITOR  = true;  // true = Monitor aktiv
 var EINSPEISUNG_LIMIT    = 6000;  // W – konfigurierte Einspeisebegrenzung (Betrag)
 var EINSPEISUNG_PUFFER   =  500;  // W – Abstand zur Grenze, ab dem erhöht wird (Trigger bei -5500W)
 var EINSPEISUNG_SCHRITT  = 1000;  // W – Erhöhung pro automatischem Schritt (und pro Telegram-Button)
