@@ -420,18 +420,20 @@ schedule('*/10 8-17 * * *', function() {
 });
 
 // Telegram Inline-Button Handler
-on({ id: TELEGRAM_INSTANZ + '.communicate.callbackQuery', change: 'ne' }, function(obj) {
+// Adapter speichert Button-Klicks in .communicate.request als "[Nutzer]callback_data"
+on({ id: TELEGRAM_INSTANZ + '.communicate.request', change: 'ne' }, function(obj) {
     var raw = obj.state.val;
-    log_info('Telegram callbackQuery: ' + JSON.stringify(raw));
     if (!raw) return;
 
-    // Adapter-Version liefert entweder reinen String oder JSON-Objekt mit .data
+    // Format: "[Martin]einsp_boost" → callback_data extrahieren
     var cbData = raw;
-    try {
-        var parsed = JSON.parse(raw);
-        if (parsed && parsed.data) cbData = parsed.data;
-    } catch (e) { /* raw ist bereits einfacher String */ }
+    var match = raw.match(/^\[.*?\](.+)$/);
+    if (match) cbData = match[1].trim();
 
+    // Nur eigene Callbacks verarbeiten, alles andere ignorieren
+    if (cbData !== 'einsp_boost' && cbData !== 'einsp_nein') return;
+
+    log_info('Telegram Button: ' + cbData);
     einspeisungButtonPending = false;
 
     if (cbData === 'einsp_boost') {
