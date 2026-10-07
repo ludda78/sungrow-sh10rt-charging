@@ -1,11 +1,43 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.1.6
+// Version: 1.2.0
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.2.0 – 2026-10-04
+//   - Modbus-Watchdog (Minutentakt, rund um die Uhr): erkennt Verbindungsverlust zum
+//     Sungrow am Alter der Modbus-Daten (neuester Zeitstempel aller Input-Register)
+//     Nach MODBUS_FEHLCHECKS Prüfungen in Folge: Netzwerk-Switch per Shelly aus/ein
+//     + Telegram-Meldung; max. MODBUS_RESET_MAX Versuche, danach Meldung „manuell prüfen"
+//     Telegram-Entwarnung sobald wieder Daten kommen
+//     Neue Parameter: MODBUS_WATCHDOG, MODBUS_TIMEOUT_SEK, MODBUS_FEHLCHECKS,
+//     MODBUS_RESET_MAX, MODBUS_RESET_PAUSE_SEK, SHELLY_AUS_SEK, DP_NETZWERK_SCHALTER
+//   - Fix: stündliche Prüfung rechnete bei Verbindungsverlust mit dem letzten bekannten
+//     SOC weiter. Jetzt: veraltete Modbus-Daten → keine Berechnung, kein Schreiben,
+//     Telegram-Meldung; SOC-Rückstands-Referenz wird verworfen
+//   - Einspeise-Monitor + Telegram-Button schreiben nicht mehr bei veralteten Daten
+//   - EINSPEISUNG_LIMIT 6000 → 7000 W: Einspeisebegrenzung im Wechselrichter wurde über
+//     die Weboberfläche des WiNet-S angehoben; Monitor greift jetzt ab 6500 W Einspeisung
+//
+// v1.1.9 – 2026-08-08
+//   - Neuer Parameter PROGNOSE_FAKTOR (Standard: 1.10):
+//     Korrigiert systematische Unterschätzung des Forecast-Adapters (+10–20%)
+//     Wird auf pvNochWh, pvNowWh und tagesPrognose angewendet (nicht auf Echtmesswerte)
+//     → Deckungsgrad und PV-Verhältnis werden realistischer
+//     → PV_PROGNOSE_SCHWELLE-Vergleich trifft bessere Entscheidungen
+//     Log zeigt korrigierte Werte (×PROGNOSE_FAKTOR) beim Tagesstart
+//   - Neuer Parameter PV_DECKUNG_KOMFORT (Standard: 3.0×):
+//     Wenn Deckungsgrad ≥ 3× wird KRITISCHER SOC-Rückstand (≥ 10%) nur noch
+//     moderat beantwortet (Basisleistung × 1.5 statt MAX_LEISTUNG)
+//     Verhindert unnötigen MAX-Sprung an Sonnentagen mit großem Verbraucher
+//     MAX greift nur noch wenn Deckungsgrad < PV_DECKUNG_KOMFORT (Forecast wirklich knapp)
+//   - Einspeisebegrenzungs-Monitor + Telegram Button: SOC-Prüfung vor Schreibzyklus
+//     Wenn Akku bereits voll (SOC ≥ ZIEL_SOC): kein Register-Schreibzyklus
+//     Stattdessen Info-Nachricht „Akku voll, Verbraucher zuschalten" via Telegram
+//     Folgeauslöser und Button-Anfragen werden bei vollem Akku ebenfalls unterdrückt
+//
 // v1.1.6 – 2026-05-23
 //   - tagesPrognose liest jetzt pvforecast.0.summary.energy.today direkt
 //     (Tagesstart + Neustart-Fallback); keine Nachrechnung mehr nötig
@@ -120,14 +152,30 @@ var PV_VERH_MODERAT = 0.7;    // 70–90% → etwas erhöhen
 
 // Mindest-Deckungsgrad: pvNochWh / fehlendeWh – PV-Alarm greift nur wenn Forecast
 // den Restbedarf nicht mehr ausreichend abdeckt (verhindert Fehlalarme bei kleinen Samples)
-var PV_DECKUNG_MIN  = 1.5;    // Forecast muss mind. 1.5× den Batteriebedarf decken
+var PV_DECKUNG_MIN    = 1.5;  // Forecast muss mind. 1.5× den Batteriebedarf decken
+var PV_DECKUNG_KOMFORT = 3.0; // Bei Deckungsgrad ≥ 3×: KRITISCHER SOC-Rückstand wird nur moderat beantwortet (× 1.5 statt MAX)
+
+// Systematischer Korrekturfaktor für Prognose-Unterschätzung des Forecast-Adapters
+// Empirisch: tatsächlicher Ertrag liegt typisch 10–20% über Prognose
+// Wird auf pvNochWh, pvNowWh und tagesPrognose angewendet (nicht auf Echtmesswerte)
+var PROGNOSE_FAKTOR   = 1.10; // 1.0 = keine Korrektur | 1.10 = +10% | 1.15 = +15%
 
 // Einspeisebegrenzungs-Monitor (alle 10 Minuten, +1 Stufe pro Prüfung)
 var EINSPEISUNG_MONITOR  = true;  // true = Monitor aktiv
-var EINSPEISUNG_LIMIT    = 6000;  // W – konfigurierte Einspeisebegrenzung (Betrag)
-var EINSPEISUNG_PUFFER   =  500;  // W – Abstand zur Grenze, ab dem erhöht wird (Trigger bei -5500W)
+// EINSPEISUNG_LIMIT muss zur Einspeisebegrenzung im Wechselrichter passen. Die lässt sich
+// über die Weboberfläche des WiNet-S ändern (2026-10: dort von 6000 auf 7000 W angehoben).
+var EINSPEISUNG_LIMIT    = 7000;  // W – konfigurierte Einspeisebegrenzung (Betrag)
+var EINSPEISUNG_PUFFER   =  500;  // W – Abstand zur Grenze, ab dem erhöht wird (Trigger bei -6500W)
 var EINSPEISUNG_SCHRITT  = 1000;  // W – Erhöhung pro automatischem Schritt (und pro Telegram-Button)
 var TELEGRAM_INSTANZ     = 'telegram.1';
+
+// Modbus-Watchdog (jede Minute, rund um die Uhr)
+var MODBUS_WATCHDOG        = true; // true = Watchdog aktiv
+var MODBUS_TIMEOUT_SEK     = 120;  // s – Modbus-Daten älter als das gelten als veraltet
+var MODBUS_FEHLCHECKS      = 2;    // Prüfungen in Folge mit veralteten Daten, bevor der Switch neu gestartet wird
+var MODBUS_RESET_MAX       = 3;    // max. Neustart-Versuche pro Störung, danach nur noch Meldung
+var MODBUS_RESET_PAUSE_SEK = 300;  // s – Wartezeit nach einem Neustart bis zum nächsten Versuch
+var SHELLY_AUS_SEK         = 10;   // s – so lange bleibt der Switch stromlos
 
 // ============================================================
 // DATENPUNKTE
@@ -142,6 +190,9 @@ var DP_NETZ              = 'alias.0.Elektro.Zaehler.power';                     
 var DP_HR_LADEN          = 'modbus.0.holdingRegisters.33046_Max_Charging_Power';  // W
 var DP_SCHREIBZYKLEN     = 'javascript.0.ladesteuerung.schreibzyklen';            // Schreibvorgänge heute
 var DP_SCHREIBZYKLEN_GES = 'javascript.0.ladesteuerung.schreibzyklen_gesamt';     // Schreibvorgänge gesamt
+var MODBUS_INSTANZ       = 'modbus.0';
+var DP_MODBUS_DATEN      = MODBUS_INSTANZ + '.inputRegisters.*';                  // Muster – neuester Zeitstempel = letzte Antwort des WR
+var DP_NETZWERK_SCHALTER = 'shelly.0.shellyplugsg3#d885ac135a64#1.Relay0.Switch'; // Shelly Plug am Netzwerk-Switch (true/false) | leer = nur Meldung, kein Neustart
 
 // ============================================================
 // ZUSTAND (wird zur Laufzeit gehalten)
@@ -154,6 +205,11 @@ var kumulierterRueckstand    = 0;      // % – Summe der SOC-Rückstände über
 var tagesPrognose            = null;   // Wh – Prognose gesamt (wird um START_STUNDE gesetzt)
 var einspeisungLetzteAutoStunde = -1; // Stunde in der der Auto-Schritt bereits ausgeführt wurde
 var einspeisungButtonPending    = false; // true = Telegram-Button gesendet, warte auf Antwort
+var modbusFehlChecks         = 0;      // Watchdog-Prüfungen in Folge mit veralteten Daten
+var modbusResetVersuche      = 0;      // Switch-Neustarts in der laufenden Störung
+var modbusNaechsterResetAb   = 0;      // Zeitstempel (ms) – vorher kein weiterer Neustart
+var modbusStoerungGemeldet   = false;  // true = Störung wurde per Telegram gemeldet (→ Entwarnung senden)
+var modbusAufgabeGemeldet    = false;  // true = „kein (weiterer) Neustart möglich" wurde gemeldet
 
 // ============================================================
 // HILFSFUNKTIONEN
@@ -165,6 +221,34 @@ function log_info(msg) {
 
 function log_warn(msg) {
     log('[Ladesteuerung] ⚠️  ' + msg, 'warn');
+}
+
+function telegram(text) {
+    sendTo(TELEGRAM_INSTANZ, 'send', { text: text });
+}
+
+// Alter der Modbus-Daten in Sekunden (null = keine Datenpunkte gefunden).
+// Einzelne Register wie der SOC ändern sich stundenlang nicht, deshalb zählt
+// der neueste Zeitstempel über alle Input-Register.
+function modbusDatenAlterSek() {
+    var neuesterTs = 0;
+    $('state[id=' + DP_MODBUS_DATEN + ']').each(function(id) {
+        var st = getState(id);
+        if (st && st.ts > neuesterTs) neuesterTs = st.ts;
+    });
+    if (neuesterTs === 0) return null;
+    return (Date.now() - neuesterTs) / 1000;
+}
+
+function modbusDatenAktuell() {
+    var alter = modbusDatenAlterSek();
+    return alter !== null && alter <= MODBUS_TIMEOUT_SEK;
+}
+
+function alterText(alterSek) {
+    if (alterSek === null) return 'unbekannt';
+    if (alterSek < 5400)   return Math.round(alterSek / 60) + ' min';
+    return (alterSek / 3600).toFixed(1) + ' h';
 }
 
 function schreibeLeistung(leistung, grund) {
@@ -214,12 +298,25 @@ schedule('2 8-17 * * *', function() {
 
     // --- Tagesstart: Prognose merken ---
     if (stunde === START_STUNDE) {
-        tagesPrognose              = getState(DP_PV_TODAY).val;
+        tagesPrognose              = getState(DP_PV_TODAY).val * PROGNOSE_FAKTOR;
         kumulierterRueckstand      = 0;
         socVorEinerStunde          = null;
         basisLeistungVorigeStunde  = null;
         setState(DP_SCHREIBZYKLEN, 0);
-        log_info('Tagesstart – Tagesprognose gesamt: ' + (tagesPrognose / 1000).toFixed(1) + ' kWh');
+        log_info('Tagesstart – Tagesprognose gesamt: ' + (tagesPrognose / 1000).toFixed(1) + ' kWh (×' + PROGNOSE_FAKTOR + ')');
+    }
+
+    // --- Modbus-Daten veraltet → nicht mit dem letzten bekannten SOC weiterrechnen ---
+    var datenAlterSek = modbusDatenAlterSek();
+    if (datenAlterSek === null || datenAlterSek > MODBUS_TIMEOUT_SEK) {
+        var socAlt = getState(DP_SOC).val;
+        log_warn('Keine aktuellen Modbus-Daten (letzte Daten vor ' + alterText(datenAlterSek) +
+                 ', letzter bekannter SOC ' + socAlt + '%) → keine Berechnung, kein Schreiben');
+        telegram('⚠️ Ladesteuerung ' + stunde + ':02 Uhr: keine aktuellen Daten vom Sungrow (letzte Daten vor ' +
+                 alterText(datenAlterSek) + ', letzter bekannter SOC ' + socAlt + '%). Prüfung übersprungen, Ladeleistung bleibt unverändert.');
+        socVorEinerStunde         = null;
+        basisLeistungVorigeStunde = null;
+        return;
     }
 
     // --- Außerhalb Zeitfenster ---
@@ -233,8 +330,8 @@ schedule('2 8-17 * * *', function() {
     var soc         = getState(DP_SOC).val;
     var pvHeuteKwh  = getState(DP_PV_HEUTE).val;                   // kWh
     var pvHeuteWh   = pvHeuteKwh * 1000;                           // in Wh umrechnen
-    var pvNowWh     = getState(DP_PV_NOW).val;                     // Wh – Prognose für bereits vergangene Zeit
-    var pvNochWh    = getState(DP_PV_PROGNOSE).val;                // Wh – noch zu erwarten heute
+    var pvNowWh     = getState(DP_PV_NOW).val      * PROGNOSE_FAKTOR; // Wh – Prognose für bereits vergangene Zeit (korrigiert)
+    var pvNochWh    = getState(DP_PV_PROGNOSE).val * PROGNOSE_FAKTOR; // Wh – noch zu erwarten heute (korrigiert)
     var restStunden   = Math.max(0, ZIEL_UHRZEIT - stunde);
     var basisLeistung = berechneBasisleistung(soc, restStunden);
     var fehlendeWh    = Math.max(0, ZIEL_SOC - soc) / 100 * BATTERIE_KWH * 1000;
@@ -242,8 +339,8 @@ schedule('2 8-17 * * *', function() {
 
     // Fallback nach Neustart: Tagesprognose direkt aus Datenpunkt lesen
     if (tagesPrognose === null) {
-        tagesPrognose = getState(DP_PV_TODAY).val;
-        log_info('Tagesprognose nach Neustart gesetzt: ' + (tagesPrognose / 1000).toFixed(1) + ' kWh');
+        tagesPrognose = getState(DP_PV_TODAY).val * PROGNOSE_FAKTOR;
+        log_info('Tagesprognose nach Neustart gesetzt: ' + (tagesPrognose / 1000).toFixed(1) + ' kWh (×' + PROGNOSE_FAKTOR + ')');
     }
 
     log_info('SOC: ' + soc + '% | PV heute: ' + pvHeuteKwh.toFixed(1) + ' kWh | ' +
@@ -319,11 +416,19 @@ schedule('2 8-17 * * *', function() {
     var leistung;
     var grund;
 
-    // Kritischer SOC-Rückstand → sofort Maximum
+    // Kritischer SOC-Rückstand → MAX, außer Forecast deckt Bedarf sehr komfortabel
     if (kumulierterRueckstand >= RUECKSTAND_KRITISCH) {
-        leistung = MAX_LEISTUNG;
-        grund    = 'KRITISCHER SOC-Rückstand (' + kumulierterRueckstand.toFixed(1) + '% kumuliert) → sofort ' + MAX_LEISTUNG + 'W';
-        log_warn(grund);
+        if (pvDeckungsgrad >= PV_DECKUNG_KOMFORT) {
+            leistung = Math.round(basisLeistung * 1.5);
+            grund    = 'SOC-Rückstand kritisch (' + kumulierterRueckstand.toFixed(1) + '%) aber Deckungsgrad ' +
+                       pvDeckungsgrad.toFixed(1) + '× ≥ ' + PV_DECKUNG_KOMFORT + '× → moderat Basisleistung × 1.5 = ' + leistung + 'W';
+            log_warn(grund);
+        } else {
+            leistung = MAX_LEISTUNG;
+            grund    = 'KRITISCHER SOC-Rückstand (' + kumulierterRueckstand.toFixed(1) + '% kumuliert) + Deckungsgrad ' +
+                       pvDeckungsgrad.toFixed(1) + '× < ' + PV_DECKUNG_KOMFORT + '× → sofort ' + MAX_LEISTUNG + 'W';
+            log_warn(grund);
+        }
 
     // PV deutlich schlechter als erwartet UND Forecast deckt Bedarf nicht mehr → Maximum
     } else if (pvVerhaeltnis !== null && pvVerhaeltnis < PV_VERH_MODERAT && pvDeckungsgrad < PV_DECKUNG_MIN) {
@@ -389,21 +494,32 @@ schedule('*/10 8-17 * * *', function() {
 
     var schwelle = -(EINSPEISUNG_LIMIT - EINSPEISUNG_PUFFER);
     if (netz >= schwelle) return; // Einspeisung noch im grünen Bereich
+    if (!modbusDatenAktuell()) return; // keine Verbindung zum WR → SOC unbekannt, Schreiben zwecklos
 
     var einspWatt    = Math.abs(netz);
     var neueLeistung = letzterWert + EINSPEISUNG_SCHRITT;
     var zielWatt     = Math.min(neueLeistung, MAX_LEISTUNG);
+    var socAktuell   = getState(DP_SOC).val;
+    var akkuVoll     = (socAktuell >= ZIEL_SOC);
 
     if (stunde !== einspeisungLetzteAutoStunde) {
-        // Erster Auslöser dieser Stunde → automatisch erhöhen, nur Info-Meldung
         einspeisungLetzteAutoStunde = stunde;
-        log_warn('Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW → Auto-Schritt +' + EINSPEISUNG_SCHRITT + 'W auf ' + zielWatt + 'W');
-        schreibeLeistung(neueLeistung, 'Einspeisebegrenzung Auto (' + (einspWatt / 1000).toFixed(1) + ' kW / ' + (EINSPEISUNG_LIMIT / 1000) + ' kW Limit)');
-        sendTo(TELEGRAM_INSTANZ, 'send', {
-            text: '⚡ Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW – Ladeleistung automatisch auf ' + zielWatt + 'W erhöht.'
-        });
+        if (akkuVoll) {
+            // Akku voll → nur Info, kein Schreibzyklus
+            log_info('Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW – Akku voll (' + socAktuell + '%), kein Schreibzyklus');
+            sendTo(TELEGRAM_INSTANZ, 'send', {
+                text: '⚡ Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW – Akku bereits voll (' + socAktuell + '%). Bitte Verbraucher zuschalten.'
+            });
+        } else {
+            // Erster Auslöser dieser Stunde → automatisch erhöhen, nur Info-Meldung
+            log_warn('Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW → Auto-Schritt +' + EINSPEISUNG_SCHRITT + 'W auf ' + zielWatt + 'W');
+            schreibeLeistung(neueLeistung, 'Einspeisebegrenzung Auto (' + (einspWatt / 1000).toFixed(1) + ' kW / ' + (EINSPEISUNG_LIMIT / 1000) + ' kW Limit)');
+            sendTo(TELEGRAM_INSTANZ, 'send', {
+                text: '⚡ Einspeisung ' + (einspWatt / 1000).toFixed(1) + ' kW – Ladeleistung automatisch auf ' + zielWatt + 'W erhöht.'
+            });
+        }
 
-    } else if (!einspeisungButtonPending) {
+    } else if (!einspeisungButtonPending && !akkuVoll) {
         // Folgeauslöser diese Stunde → per Button anfragen, nicht automatisch erhöhen
         einspeisungButtonPending = true;
         sendTo(TELEGRAM_INSTANZ, 'send', {
@@ -416,7 +532,7 @@ schedule('*/10 8-17 * * *', function() {
             })
         });
     }
-    // else: Button noch ausstehend → nicht erneut fragen
+    // else: Button noch ausstehend oder Akku voll → nicht erneut fragen
 });
 
 // Telegram Inline-Button Handler
@@ -441,6 +557,15 @@ on({ id: TELEGRAM_INSTANZ + '.communicate.request', change: 'ne' }, function(obj
             sendTo(TELEGRAM_INSTANZ, 'send', { text: '⚠️ Bereits bei MAX_LEISTUNG, keine weitere Erhöhung möglich.' });
             return;
         }
+        if (!modbusDatenAktuell()) {
+            telegram('⚠️ Keine aktuellen Daten vom Sungrow – Erhöhung nicht möglich.');
+            return;
+        }
+        var socBtn = getState(DP_SOC).val;
+        if (socBtn >= ZIEL_SOC) {
+            sendTo(TELEGRAM_INSTANZ, 'send', { text: '⚠️ Akku bereits voll (' + socBtn + '%), kein Schreibzyklus nötig. Bitte Verbraucher zuschalten.' });
+            return;
+        }
         var neueLeistung = letzterWert + EINSPEISUNG_SCHRITT;
         var zielWatt     = Math.min(neueLeistung, MAX_LEISTUNG);
         schreibeLeistung(neueLeistung, 'Manueller Boost via Telegram');
@@ -463,6 +588,92 @@ on({ id: TELEGRAM_INSTANZ + '.communicate.request', change: 'ne' }, function(obj
     } else if (cbData === 'einsp_nein') {
         sendTo(TELEGRAM_INSTANZ, 'send', { text: 'OK, keine weitere Erhöhung.' });
     }
+});
+
+// ============================================================
+// MODBUS-WATCHDOG – läuft jede Minute, rund um die Uhr
+// ============================================================
+
+function netzwerkSwitchNeustart() {
+    setState(DP_NETZWERK_SCHALTER, false);
+    setTimeout(function() {
+        setState(DP_NETZWERK_SCHALTER, true);
+        // Kontrolle: Switch darf auf keinen Fall aus bleiben
+        setTimeout(function() {
+            if (getState(DP_NETZWERK_SCHALTER).val !== true) {
+                log_warn('Netzwerk-Switch nach Neustart nicht wieder eingeschaltet – zweiter Versuch');
+                setState(DP_NETZWERK_SCHALTER, true);
+                telegram('🚨 Netzwerk-Switch (Shelly) meldet nach dem Neustart nicht „ein" – bitte prüfen!');
+            }
+        }, 15000);
+    }, SHELLY_AUS_SEK * 1000);
+}
+
+schedule('* * * * *', function() {
+    if (!MODBUS_WATCHDOG) return;
+
+    var alterSek = modbusDatenAlterSek();
+    if (alterSek === null) {
+        if (!modbusAufgabeGemeldet) {
+            modbusAufgabeGemeldet = true;
+            log_warn('Modbus-Watchdog: keine Datenpunkte unter ' + DP_MODBUS_DATEN + ' gefunden – Watchdog ohne Funktion');
+        }
+        return;
+    }
+
+    // --- Daten aktuell → ggf. Entwarnung, Zustand zurücksetzen ---
+    if (alterSek <= MODBUS_TIMEOUT_SEK) {
+        if (modbusStoerungGemeldet) {
+            log_info('Modbus-Watchdog: Sungrow liefert wieder Daten (nach ' + modbusResetVersuche + ' Switch-Neustart(s))');
+            telegram('✅ Sungrow liefert wieder Daten (nach ' + modbusResetVersuche + ' Switch-Neustart(s)).');
+        }
+        modbusFehlChecks       = 0;
+        modbusResetVersuche    = 0;
+        modbusNaechsterResetAb = 0;
+        modbusStoerungGemeldet = false;
+        modbusAufgabeGemeldet  = false;
+        return;
+    }
+
+    // --- Daten veraltet ---
+    modbusFehlChecks++;
+    if (modbusFehlChecks < MODBUS_FEHLCHECKS) return;   // erst bei wiederholtem Befund reagieren
+    if (Date.now() < modbusNaechsterResetAb) return;    // letzter Neustart braucht noch Zeit
+    if (modbusAufgabeGemeldet) return;                  // nichts mehr zu tun, Meldung ist raus
+
+    var stoerung = 'Sungrow: seit ' + alterText(alterSek) + ' keine Modbus-Daten';
+
+    // Adapter gestoppt → Switch-Neustart hilft nicht
+    var adapterAlive = getState('system.adapter.' + MODBUS_INSTANZ + '.alive').val;
+    if (adapterAlive === false) {
+        modbusAufgabeGemeldet  = true;
+        modbusStoerungGemeldet = true;
+        log_warn('Modbus-Watchdog: ' + stoerung + ' – Adapter ' + MODBUS_INSTANZ + ' läuft nicht, kein Switch-Neustart');
+        telegram('⚠️ ' + stoerung + ' – der Adapter ' + MODBUS_INSTANZ + ' läuft nicht. Kein Switch-Neustart, bitte Adapter prüfen.');
+        return;
+    }
+
+    if (!DP_NETZWERK_SCHALTER || !existsState(DP_NETZWERK_SCHALTER)) {
+        modbusAufgabeGemeldet  = true;
+        modbusStoerungGemeldet = true;
+        log_warn('Modbus-Watchdog: ' + stoerung + ' – DP_NETZWERK_SCHALTER nicht konfiguriert/gefunden, kein Neustart möglich');
+        telegram('⚠️ ' + stoerung + '. Automatischer Switch-Neustart nicht eingerichtet – bitte manuell aus-/einschalten.');
+        return;
+    }
+
+    if (modbusResetVersuche >= MODBUS_RESET_MAX) {
+        modbusAufgabeGemeldet = true;
+        log_warn('Modbus-Watchdog: ' + stoerung + ' – ' + modbusResetVersuche + ' Switch-Neustarts ohne Erfolg, gebe auf');
+        telegram('🚨 ' + stoerung + '. ' + modbusResetVersuche + ' Switch-Neustarts ohne Erfolg – bitte manuell prüfen!');
+        return;
+    }
+
+    modbusResetVersuche++;
+    modbusNaechsterResetAb = Date.now() + MODBUS_RESET_PAUSE_SEK * 1000;
+    modbusStoerungGemeldet = true;
+    log_warn('Modbus-Watchdog: ' + stoerung + ' → Netzwerk-Switch-Neustart (Versuch ' + modbusResetVersuche + '/' + MODBUS_RESET_MAX + ')');
+    telegram('⚠️ ' + stoerung + ' → Netzwerk-Switch wird neu gestartet (Versuch ' + modbusResetVersuche + '/' + MODBUS_RESET_MAX + ').');
+    netzwerkSwitchNeustart();
 });
 
 createState('ladesteuerung.schreibzyklen',     0, false, { name: 'Ladesteuerung – Schreibzyklen heute',  type: 'number', role: 'value', unit: '' });
