@@ -1,11 +1,19 @@
 // ============================================================
 // Sungrow SH10RT – Adaptive Ladesteuerung
-// Version: 1.2.0
+// Version: 1.2.1
 // Modus: DRY_RUN = true → kein Schreiben, nur Logging
 // ============================================================
 //
 // CHANGELOG
 // ---------
+// v1.2.1 – 2026-10-07
+//   - Modbus-Watchdog: Modbus läuft jetzt über einen Proxy auf dem Raspi 5.
+//     Vor dem Switch-Neustart wird geprüft, ob der Proxy per TCP erreichbar ist.
+//     Proxy/Raspi nicht erreichbar → kein Switch-Neustart, nur Telegram-Meldung;
+//     Prüfung läuft weiter und startet den Switch neu, falls der Proxy wieder da ist
+//     und trotzdem keine Daten kommen
+//     Neue Parameter: MODBUS_PROXY_HOST, MODBUS_PROXY_PORT
+//
 // v1.2.0 – 2026-10-04
 //   - Modbus-Watchdog (Minutentakt, rund um die Uhr): erkennt Verbindungsverlust zum
 //     Sungrow am Alter der Modbus-Daten (neuester Zeitstempel aller Input-Register)
@@ -176,6 +184,10 @@ var MODBUS_FEHLCHECKS      = 2;    // Prüfungen in Folge mit veralteten Daten, 
 var MODBUS_RESET_MAX       = 3;    // max. Neustart-Versuche pro Störung, danach nur noch Meldung
 var MODBUS_RESET_PAUSE_SEK = 300;  // s – Wartezeit nach einem Neustart bis zum nächsten Versuch
 var SHELLY_AUS_SEK         = 10;   // s – so lange bleibt der Switch stromlos
+// Modbus läuft über einen Proxy auf dem Raspi 5: ist der Proxy selbst nicht erreichbar,
+// wird der Switch NICHT neu gestartet (nur Meldung). Leer = keine Proxy-Prüfung.
+var MODBUS_PROXY_HOST      = '192.168.178.105'; // IP des Raspi 5 mit dem Modbus-Proxy
+var MODBUS_PROXY_PORT      = 502;               // Port des Modbus-Proxys
 
 // ============================================================
 // DATENPUNKTE
@@ -210,6 +222,7 @@ var modbusResetVersuche      = 0;      // Switch-Neustarts in der laufenden Stö
 var modbusNaechsterResetAb   = 0;      // Zeitstempel (ms) – vorher kein weiterer Neustart
 var modbusStoerungGemeldet   = false;  // true = Störung wurde per Telegram gemeldet (→ Entwarnung senden)
 var modbusAufgabeGemeldet    = false;  // true = „kein (weiterer) Neustart möglich" wurde gemeldet
+var modbusProxyGemeldet      = false;  // true = „Proxy nicht erreichbar" wurde gemeldet
 
 // ============================================================
 // HILFSFUNKTIONEN
@@ -594,6 +607,21 @@ on({ id: TELEGRAM_INSTANZ + '.communicate.request', change: 'ne' }, function(obj
 // MODBUS-WATCHDOG – läuft jede Minute, rund um die Uhr
 // ============================================================
 
+// Prüft per TCP-Verbindungsaufbau, ob ein Dienst antwortet – callback(true/false)
+function tcpErreichbar(host, port, callback) {
+    var fertig = false;
+    var sock   = require('net').connect({ host: host, port: port });
+    function ende(ok) {
+        if (fertig) return;
+        fertig = true;
+        sock.destroy();
+        callback(ok);
+    }
+    sock.setTimeout(3000, function() { ende(false); });
+    sock.on('connect', function() { ende(true); });
+    sock.on('error',   function() { ende(false); });
+}
+
 function netzwerkSwitchNeustart() {
     setState(DP_NETZWERK_SCHALTER, false);
     setTimeout(function() {
@@ -632,6 +660,7 @@ schedule('* * * * *', function() {
         modbusNaechsterResetAb = 0;
         modbusStoerungGemeldet = false;
         modbusAufgabeGemeldet  = false;
+        modbusProxyGemeldet    = false;
         return;
     }
 
@@ -653,6 +682,30 @@ schedule('* * * * *', function() {
         return;
     }
 
+    // Ohne Proxy-Prüfung direkt zum Switch-Neustart
+    if (!MODBUS_PROXY_HOST) {
+        modbusSwitchNeustartVersuch(stoerung);
+        return;
+    }
+
+    // Proxy/Pi ausgefallen → Switch-Neustart hilft nicht und würde nur das Netz unterbrechen
+    tcpErreichbar(MODBUS_PROXY_HOST, MODBUS_PROXY_PORT, function(erreichbar) {
+        if (erreichbar) {
+            modbusProxyGemeldet = false;
+            modbusSwitchNeustartVersuch(stoerung);
+            return;
+        }
+        if (modbusProxyGemeldet) return; // Meldung ist raus, weiter jede Minute prüfen
+        modbusProxyGemeldet    = true;
+        modbusStoerungGemeldet = true;
+        log_warn('Modbus-Watchdog: ' + stoerung + ' – Modbus-Proxy ' + MODBUS_PROXY_HOST + ':' + MODBUS_PROXY_PORT +
+                 ' nicht erreichbar, kein Switch-Neustart');
+        telegram('⚠️ ' + stoerung + ' – der Modbus-Proxy ' + MODBUS_PROXY_HOST + ':' + MODBUS_PROXY_PORT +
+                 ' ist nicht erreichbar. Kein Switch-Neustart, bitte Proxy/Raspi prüfen.');
+    });
+});
+
+function modbusSwitchNeustartVersuch(stoerung) {
     if (!DP_NETZWERK_SCHALTER || !existsState(DP_NETZWERK_SCHALTER)) {
         modbusAufgabeGemeldet  = true;
         modbusStoerungGemeldet = true;
@@ -674,7 +727,7 @@ schedule('* * * * *', function() {
     log_warn('Modbus-Watchdog: ' + stoerung + ' → Netzwerk-Switch-Neustart (Versuch ' + modbusResetVersuche + '/' + MODBUS_RESET_MAX + ')');
     telegram('⚠️ ' + stoerung + ' → Netzwerk-Switch wird neu gestartet (Versuch ' + modbusResetVersuche + '/' + MODBUS_RESET_MAX + ').');
     netzwerkSwitchNeustart();
-});
+}
 
 createState('ladesteuerung.schreibzyklen',     0, false, { name: 'Ladesteuerung – Schreibzyklen heute',  type: 'number', role: 'value', unit: '' });
 createState('ladesteuerung.schreibzyklen_gesamt', 0, false, { name: 'Ladesteuerung – Schreibzyklen gesamt', type: 'number', role: 'value', unit: '' });
